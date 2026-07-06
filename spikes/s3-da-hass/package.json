@@ -1,0 +1,16 @@
+{
+  "name": "s3-da-hass",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@digital-alchemy/type-writer": "^26.2.12",
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@digital-alchemy/hass": "^26.6.13"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "workerId": 1,
+  "attempted": 1742211,
+  "succeeded": 4054,
+  "busyErrors": 1738157,
+  "otherErrors": 0,
+  "perCounterSucceeded": {
+    "c0": 1331,
+    "c1": 1375,
+    "c2": 1348
+  },
+  "errorSamples": [
+    "SQLITE_BUSY: database is locked",
+    "SQLITE_BUSY: database is locked",
+    "SQLITE_BUSY: database is locked"
+  ],
+  "elapsedMs": 8000
+}

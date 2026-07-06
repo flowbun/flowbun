@@ -1,0 +1,23 @@
+# Phase 0 decision table
+
+Filled in from the spikes in this directory. Each spike is throwaway code with its own `RESULTS.md`; this file is the rollup guidance.md's Part 2 asked for. All six spikes are now complete.
+
+| # | Unknown | Verdict | Evidence | Fallback needed? |
+|---|---|---|---|---|
+| S1 | Bun Worker maturity (worker-per-block) | **PASS, with a flagged follow-up** | Idle memory ~5.5 MB/worker (smol made no measurable difference idle); structuredClone fidelity clean incl. `Date`; uncaught throw reliably fires parent `error` but worker doesn't self-recover; `terminate()` on an infinite loop genuinely stops the OS thread (verified via `/proc` CPU ticks), ~6-7ms to spawn a replacement; `bun:sqlite` loads fine in a worker. **Open risk**: RSS grew ~57-59% over 300 spawn/terminate cycles without plateauing, even with a settle delay ruling out async-teardown lag — not yet determined if this converges or is unbounded. | Not needed yet — see note below |
+| S2 | Coordinator↔flow-host IPC (`Bun.spawn` ipc) | **PASS** | Structured round-trip incl. `Date` intact; crash mid-flight delivered exactly the acks sent before crash, no hang/duplicates; exit signals reliable and distinguishable (clean/SIGTERM/SIGKILL); ~2.0-2.1M msgs/sec sustained both directions (~1000x the "thousands/sec" target). | No |
+| S3 | DA hass headless embedding | **PASS** | Bootstraps with zero DA scaffolding: `bun add @digital-alchemy/hass` + `.env` + `CreateApplication({libraries:[LIB_HASS]}).bootstrap()` — DA itself ships a `QuickBoot()` mode documented for exactly this "probe from the command line" usage. Live read/subscribe confirmed against the user's real instance (read-only `sensor.*` entity, two live state-change events captured). `type-writer` runs fine outside a DA-template repo (only needs its output dir pre-created). **Caveat**: a bad endpoint at initial boot is fail-fast (uncaught error, no retry) — reconnect-with-retry only kicks in for a drop *after* a successful boot (fixed 5s interval, no backoff/jitter). | No |
+| S4 | Typecheck-on-reload latency | **PASS** | 30-block synthetic flow: cold 410-470ms, warm 370-490ms across scenarios — all well under the ~2s target. Technique validated: a deliberately broken wire type was correctly caught by `tsc`. Caveat: cold ≈ warm suggests fixed `tsc` startup cost dominates at this scale, not proven to extrapolate linearly to much larger flows. | No |
+| S5 | SQLite across processes | **PASS** | 5 processes hammering shared rows: without `busy_timeout`, 99.77% of writes hit `SQLITE_BUSY`; with `busy_timeout=5000`, only 0.01% did. `integrity_check` clean both times, no lost writes, ~3,540 writes/sec under contention. | No |
+| S6 | fs.watch on bind mount (Podman/Fedora) | **PASS** | All four host-side op types (create/modify/rename/delete) detected inside the container via `fs.watch`, confirmed under both Podman and Docker on this machine. Likely why: this is bare-metal Linux, not Docker Desktop's VM-proxied filesystem (the actual source of the "fs.watch on bind mounts is broken" folklore). mtime-polling fallback also verified working, just not needed. | No |
+
+## Net effect on the architecture
+
+All six spikes came back PASS, meaningfully de-risking the PoC as scoped: worker-per-block, `Bun.spawn` IPC, the typecheck-on-reload pipeline, multi-process SQLite, `fs.watch`-based reload, and DA hass as a standalone library can all proceed as designed rather than falling back. None of the six fallbacks in the original risk register are currently needed.
+
+**S1's open item matters for how workers get recycled, not whether to use them.** Per the architecture, a block's `Worker` lives for the lifetime of its flow process and is only respawned on a flow reload (developer save-triggered, not per-message) — so even if the per-cycle RSS growth is a genuine unbounded leak rather than something that plateaus, its practical exposure is bounded by reload frequency, not message throughput. It's still worth resolving before relying on long-lived flows across many reloads: rerun `leak-loop.ts` at 5,000-50,000 iterations and/or profile with heap snapshotting. If it turns out to be real and unbounded, the mitigation is a small worker pool (reuse workers across reloads) rather than abandoning worker-per-block.
+
+## Still open
+
+- S1 follow-up: longer-running leak-loop soak test / heap profiling (flagged above, not blocking).
+- S3 follow-up: the coordinator's HA boundary block should treat "not connected at all yet" (fail-fast on bad initial boot) differently from "was connected, dropped" (auto-retries) — worth an explicit startup-retry wrapper rather than relying on DA's built-in behavior for the first connection attempt.

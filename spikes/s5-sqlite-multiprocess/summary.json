@@ -1,0 +1,238 @@
+{
+  "noTimeout": {
+    "label": "no-busy-timeout",
+    "busyTimeoutMs": 0,
+    "numWorkers": 5,
+    "durationMs": 8000,
+    "wallMs": 8039,
+    "results": [
+      {
+        "workerId": 0,
+        "attempted": 1750240,
+        "succeeded": 4038,
+        "busyErrors": 1746202,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 1315,
+          "c1": 1382,
+          "c2": 1341
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8000
+      },
+      {
+        "workerId": 1,
+        "attempted": 1742211,
+        "succeeded": 4054,
+        "busyErrors": 1738157,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 1331,
+          "c1": 1375,
+          "c2": 1348
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8000
+      },
+      {
+        "workerId": 2,
+        "attempted": 1726053,
+        "succeeded": 3990,
+        "busyErrors": 1722063,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 1345,
+          "c1": 1289,
+          "c2": 1356
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8000
+      },
+      {
+        "workerId": 3,
+        "attempted": 1701717,
+        "succeeded": 4018,
+        "busyErrors": 1697699,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 1338,
+          "c1": 1350,
+          "c2": 1330
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8000
+      },
+      {
+        "workerId": 4,
+        "attempted": 1699842,
+        "succeeded": 4062,
+        "busyErrors": 1695780,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 1344,
+          "c1": 1339,
+          "c2": 1379
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked",
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8000
+      }
+    ],
+    "rows": [
+      {
+        "id": "c0",
+        "value": 6673
+      },
+      {
+        "id": "c1",
+        "value": 6735
+      },
+      {
+        "id": "c2",
+        "value": 6754
+      }
+    ],
+    "walExists": true,
+    "shmExists": true,
+    "integrityOk": true,
+    "integrityRaw": "ok",
+    "totalAttempted": 8620063,
+    "totalSucceeded": 20162,
+    "totalBusy": 8599901,
+    "totalOther": 0,
+    "totalValue": 20162,
+    "valuesMatch": true,
+    "perCounterMatch": true,
+    "throughputWritesPerSec": 2508.023385993283
+  },
+  "withTimeout": {
+    "label": "busy-timeout-5000",
+    "busyTimeoutMs": 5000,
+    "numWorkers": 5,
+    "durationMs": 8000,
+    "wallMs": 8148,
+    "results": [
+      {
+        "workerId": 0,
+        "attempted": 2,
+        "succeeded": 1,
+        "busyErrors": 1,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 0,
+          "c1": 1,
+          "c2": 0
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8039
+      },
+      {
+        "workerId": 1,
+        "attempted": 2,
+        "succeeded": 1,
+        "busyErrors": 1,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 0,
+          "c1": 1,
+          "c2": 0
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8139
+      },
+      {
+        "workerId": 2,
+        "attempted": 168,
+        "succeeded": 168,
+        "busyErrors": 0,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 56,
+          "c1": 56,
+          "c2": 56
+        },
+        "errorSamples": [],
+        "elapsedMs": 8019
+      },
+      {
+        "workerId": 3,
+        "attempted": 28542,
+        "succeeded": 28542,
+        "busyErrors": 0,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 9514,
+          "c1": 9514,
+          "c2": 9514
+        },
+        "errorSamples": [],
+        "elapsedMs": 8000
+      },
+      {
+        "workerId": 4,
+        "attempted": 109,
+        "succeeded": 108,
+        "busyErrors": 1,
+        "otherErrors": 0,
+        "perCounterSucceeded": {
+          "c0": 37,
+          "c1": 36,
+          "c2": 35
+        },
+        "errorSamples": [
+          "SQLITE_BUSY: database is locked"
+        ],
+        "elapsedMs": 8000
+      }
+    ],
+    "rows": [
+      {
+        "id": "c0",
+        "value": 9607
+      },
+      {
+        "id": "c1",
+        "value": 9608
+      },
+      {
+        "id": "c2",
+        "value": 9605
+      }
+    ],
+    "walExists": true,
+    "shmExists": true,
+    "integrityOk": true,
+    "integrityRaw": "ok",
+    "totalAttempted": 28823,
+    "totalSucceeded": 28820,
+    "totalBusy": 3,
+    "totalOther": 0,
+    "totalValue": 28820,
+    "valuesMatch": true,
+    "perCounterMatch": true,
+    "throughputWritesPerSec": 3537.0643102601866
+  }
+}

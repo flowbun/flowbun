@@ -1,0 +1,14 @@
+{
+  "workerId": 3,
+  "attempted": 28542,
+  "succeeded": 28542,
+  "busyErrors": 0,
+  "otherErrors": 0,
+  "perCounterSucceeded": {
+    "c0": 9514,
+    "c1": 9514,
+    "c2": 9514
+  },
+  "errorSamples": [],
+  "elapsedMs": 8000
+}
