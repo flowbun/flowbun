@@ -8,6 +8,7 @@ import type { LogRecord } from "flowbun/ipc";
  */
 export class LogBuffer {
   private buf: LogRecord[] = [];
+  private listeners = new Set<(entry: LogRecord) => void>();
 
   constructor(private readonly capacity = 5000) {}
 
@@ -15,6 +16,15 @@ export class LogBuffer {
     this.buf.push(entry);
     if (this.buf.length > this.capacity)
       this.buf.splice(0, this.buf.length - this.capacity);
+    for (const listener of this.listeners) listener(entry);
+  }
+
+  subscribe(listener: (entry: LogRecord) => void): void {
+    this.listeners.add(listener);
+  }
+
+  unsubscribe(listener: (entry: LogRecord) => void): void {
+    this.listeners.delete(listener);
   }
 
   all(): readonly LogRecord[] {

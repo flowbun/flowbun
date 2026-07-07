@@ -21,12 +21,12 @@ Flowbun is the synthesis: a small [flow-based programming](https://en.wikipedia.
 This repo is a proof-of-concept, built in phases:
 
 - **Phase 0 — spikes** (done): six throwaway experiments answering the risky unknowns before committing to an architecture — Bun `Worker` behavior under load, `Bun.spawn` IPC, `@digital-alchemy/hass` embedded outside a full DA app, typecheck-on-reload latency, multi-process SQLite, and `fs.watch` on a container bind mount. Full writeups and measured evidence are in [`spikes/`](spikes/), rolled up in [`spikes/DECISIONS.md`](spikes/DECISIONS.md).
-- **Phase 1 — headless core runtime** (done): the actual engine — `defineBlock`, block discovery, the wiring format, the router, three-scope state, the typecheck gate, and the Home Assistant boundary blocks — running in a single process with the simplest possible transport (plain async calls). This is what's in [`packages/runtime`](packages/runtime) today, exercised by the example flows in [`data/`](data).
-- **Phase 2 — distribution and supervision** (not started): the real topology — a coordinator process supervising one flow-host process per flow, one Worker per block, crash recovery, hot reload.
-- **Phase 3 — editor** (not started): a browser UI (React Flow + Monaco) that reads and writes the same wiring/block files, live over a websocket.
+- **Phase 1 — headless core runtime** (done): the actual engine — `defineBlock`, block discovery, the wiring format, the router, three-scope state, the typecheck gate, and the Home Assistant boundary blocks — running in a single process with the simplest possible transport (plain async calls). This is what's in [`packages/runtime`](packages/runtime), exercised by the in-process demo (`bun run demo:hallway`) and the example flows in [`data/`](data).
+- **Phase 2 — distribution and supervision** (done): the real topology — a [`packages/coordinator`](packages/coordinator) process holding the only Home Assistant connection, one [`packages/flow-host`](packages/flow-host) child process per flow, one Worker per block instance, crash recovery with backoff/crash-loop detection, and a debounced real-`fs.watch` reload pipeline that typechecks before ever touching a running process. Verified live against a real HA instance: `kill -9`-ing a flow-host self-heals with state intact, a broken block type leaves every other flow untouched, and a dedicated test flow proved a real (non-dry-run) HA write end-to-end.
+- **Phase 3 — editor** (in progress): a browser UI (React Flow + Monaco) that reads and writes the same wiring/block files, live over a websocket.
 - **Phase 4 — packaging** (not started): containerization, and porting one real automation each from an existing Node-RED and HASS-native setup as the acid test.
 
-Everything described below as "the runtime" is Phase 1: real, tested code, but running in-process with no isolation between blocks yet. The full multi-process/multi-Worker topology described in [Architecture](#architecture) is the target, not (yet) the implementation.
+"The runtime" below means [`packages/runtime`](packages/runtime) — the engine shared by every topology. Phase 1's in-process demo and Phase 2's distributed coordinator/flow-host/Worker topology both run the exact same `Router`, block format, and typecheck gate; they differ only in which `NodeExecutor` the `Router` is given (see [Architecture](#architecture)).
 
 ## Repo structure
 
@@ -38,11 +38,25 @@ flowbun/
         block.ts          # defineBlock + the BlockDef/BlockContext types every block is written against
         discovery/          # scans data/blocks/*.ts and registers the built-in @hass/* blocks
         wiring/               # Zod schema for wiring JSON, the loader, and flow assembly
-        router/                 # message routing: mailboxes, sequence numbers, trace IDs
+        router/                 # message routing: mailboxes, sequence numbers, trace IDs, the Executor seam
         state/                    # the three-scope state API over bun:sqlite
         typecheck/                  # generates and runs the synthetic wire-assertion file (see below)
         hass/                         # the only code allowed to talk to Home Assistant
-        demo/                           # the headless milestone runner
+        ipc/                            # message types shared between coordinator and flow-host
+        demo/                             # the in-process headless milestone runner (Phase 1)
+    flow-host/          # one OS process per flow — the real topology's per-flow half
+      src/
+        main.ts            # entrypoint: assembles its one flow, wires IPC to the coordinator
+        worker-manager.ts     # persistent per-node Worker pool + its own micro-supervisor
+        worker-entry.ts          # the Worker-thread script: imports one block, runs its process()
+        distributed-executor.ts    # NodeExecutor: Workers for ordinary nodes, IPC relay for @hass/action
+    coordinator/        # the long-lived parent — the real topology's supervisory half
+      src/
+        main.ts            # entrypoint: initial typecheck, spawns every flow, starts the watcher
+        supervisor.ts         # spawn/restart/backoff/crash-loop/status per flow
+        ha-relay.ts              # the only place the real Home Assistant connection is opened
+        watcher.ts                 # debounced real fs.watch -> reload decisions
+        log-buffer.ts                # bounded ring buffer for structured logs forwarded from flow-hosts
   data/                 # a real flowbun "data directory" — what would be bind-mounted in production
     blocks/               # one .ts file per block type, written against `flowbun`
     wiring/                 # one <flow-name>.json per flow — the actual source of truth
@@ -91,7 +105,17 @@ Anything crossing a genuine trust boundary — Home Assistant event payloads, th
 
 Only two block types can reach Home Assistant: `@hass/trigger` and `@hass/action`. Ordinary blocks import `defineBlock` (and whatever else they like — Zod, `fetch`, anything on npm) but are never handed a reference to the Home Assistant connection; the capability is simply never injected into their scope. This isn't a sandbox (a block *can* still shell out to any third-party API it wants — that's deliberate), it's a narrower guarantee: the one thing that can change the state of your physical house is confined to two well-known block types.
 
-`@hass/action` also has a **dry-run mode** (`FLOWBUN_DRY_RUN`, defaulting to `"true"` — safe by default, a missing env var never accidentally enables real writes). In dry-run, it logs the exact service call it would have made instead of making it. This exists because Phase 1 was developed and demoed against a real, live Home Assistant instance, and the person doing that development wasn't ready for an AI-written runtime to start flipping real lights — dry-run made "prove the whole pipeline end-to-end, live" and "never actually write to the house" simultaneously true.
+`@hass/action` also has a **dry-run mode** (`FLOWBUN_DRY_RUN`, defaulting to `"true"` — safe by default, a missing env var never accidentally enables real writes). In dry-run, it logs the exact service call it would have made instead of making it. This exists because Phase 1 was developed and demoed against a real, live Home Assistant instance, and the person doing that development wasn't ready for an AI-written runtime to start flipping real lights — dry-run made "prove the whole pipeline end-to-end, live" and "never actually write to the house" simultaneously true. A single node can also override the global setting with a raw `"dryRun": false` in its own wiring config (see `data/wiring/flowbun_test.json`) — deliberately *not* part of `@hass/action`'s typed config, so one flow can go live for real testing while every other flow on the same coordinator stays safely in dry-run.
+
+In the distributed topology (Phase 2), this boundary became a real process boundary, not just an API-surface convention: only the coordinator process (`packages/coordinator/src/ha-relay.ts`) ever opens the actual Home Assistant connection. A flow-host never calls `getHass()` at all — it recognizes `@hass/trigger`/`@hass/action` nodes by name and relays subscribe/call requests to the coordinator over IPC instead of ever invoking their `process()`. The dry-run/call logic itself still lives in exactly one place (`performHassAction()` in `hass/action.ts`), called both by the in-process demo's `process()` and by the coordinator's relay, so it's never duplicated.
+
+### Pluggable execution: the same Router, three different backends
+
+`Router` doesn't call `block.process()` directly — it delegates to a swappable `NodeExecutor`. Phase 1's demo uses the default `InProcessExecutor` (today's logic, extracted verbatim). Phase 2's flow-host supplies a `DistributedExecutor` instead: ordinary nodes go to a persistent per-node `Worker` (spawned once per flow-host lifetime, never per-message — the concrete mitigation for a Bun-`Worker`-leak risk flagged in the Phase 0 spikes, since that risk was specifically about *rapid repeated* spawn/terminate cycles, which this design never does), and `@hass/action` nodes go to the coordinator over IPC. Same wiring format, same typecheck gate, same block code, three different places the actual `process()` call can happen — the Router itself never needs to know which.
+
+### Supervision: crash recovery, and typechecking as a gate on the *running* process
+
+The coordinator restarts a crashed flow-host with exponential backoff (500ms base, capped at 30s), and flags a flow `crash-looped` after more than 5 unexpected exits in a rolling 5-minute window rather than restarting forever. Critically, the coordinator runs the typecheck gate itself, *before* ever touching a running flow-host: a `data/blocks/*.ts` edit re-typechecks every loaded flow (since the generated wire-assertion file inherently covers all of them together), and on failure every flow's existing process is left completely alone — verified directly by comparing pids before and after a deliberately broken edit. Only a passing typecheck triggers an actual restart.
 
 ### Single-input firing, not join semantics
 
@@ -99,11 +123,11 @@ A block's `process()` fires once per message arriving at *one* named input port;
 
 ### Three-scope state over SQLite, not in-memory
 
-State is explicitly *not* purely functional — it's `bun:sqlite` in WAL mode, with per-block, per-flow, and global scopes sharing one `flowbun.sqlite` file, partitioned by a `(scope, scope_key, key)` primary key. State living outside the block's own memory means it survives block reloads and flow restarts — a debounce timer, a "have I already fired today" flag, and similar bookkeeping shouldn't evaporate every time you save a file and the flow hot-reloads. Multi-process concurrent access to one SQLite file was one of the Phase 0 spikes (setting `busy_timeout` collapsed contention errors from ~99.8% of writes to ~0.01% under a deliberately adversarial worst case, with no corruption or lost writes), so this is expected to keep working once Phase 2 introduces real multi-process flows.
+State is explicitly *not* purely functional — it's `bun:sqlite` in WAL mode, with per-block, per-flow, and global scopes sharing one `flowbun.sqlite` file, partitioned by a `(scope, scope_key, key)` primary key. State living outside the block's own memory means it survives block reloads and flow restarts — a debounce timer, a "have I already fired today" flag, and similar bookkeeping shouldn't evaporate every time you save a file and the flow hot-reloads. Multi-process concurrent access to one SQLite file was one of the Phase 0 spikes (setting `busy_timeout` collapsed contention errors from ~99.8% of writes to ~0.01% under a deliberately adversarial worst case, with no corruption or lost writes) — and Phase 2 confirmed it directly: a `debounce` timestamp survived a real `kill -9` of its flow-host process byte-for-byte, with the coordinator and every flow-host's Workers all opening independent connections to the same `flowbun.sqlite`.
 
 ### Messages are copy-on-write via `structuredClone`
 
-Every hop between blocks clones the payload, even though Phase 1 runs entirely in one process and could get away with passing references. This is deliberate now, not added later: it keeps a block's mutation of its own inputs from ever silently corrupting a sibling branch's copy of the same message, and it means Phase 2 (where some of these hops become real process/Worker boundaries with unavoidable serialization) won't change block-author-visible behavior at all.
+Every hop between blocks clones the payload, even in Phase 1's single-process demo, which could otherwise get away with passing references. This was deliberate ahead of time: it keeps a block's mutation of its own inputs from ever silently corrupting a sibling branch's copy of the same message, and it meant Phase 2 — where some of these hops became real Worker `postMessage`/IPC boundaries with unavoidable serialization — needed zero changes to block-author-visible behavior. Confirmed, not just planned: the same block code runs unmodified in both topologies.
 
 ## Running it
 
@@ -113,7 +137,15 @@ cp spikes/s3-da-hass/.env .env   # or your own HASS_BASE_URL / HASS_TOKEN
 bun run demo:hallway
 ```
 
-This discovers the blocks in `data/blocks/`, validates and typechecks every flow in `data/wiring/`, then runs both example flows: `outdoor_temp_demo` (a real, Zod-validated fetch to a public weather API) and `hallway_lights` (a real, read-only subscription to a Home Assistant motion sensor, feeding `debounce → presence_logic → @hass/action`, with the final light command logged in dry-run rather than executed). Set `FLOWBUN_DEMO_WINDOW_MS` to change how long it listens (default 2 minutes; `0` runs until Ctrl-C), and `FLOWBUN_DRY_RUN=false` if you're ready to let it make real service calls.
+This discovers the blocks in `data/blocks/`, validates and typechecks every flow in `data/wiring/`, then runs both example flows in-process: `outdoor_temp_demo` (a real, Zod-validated fetch to a public weather API) and `hallway_lights` (a real, read-only subscription to a Home Assistant motion sensor, feeding `debounce → presence_logic → @hass/action`, with the final light command logged in dry-run rather than executed). Set `FLOWBUN_DEMO_WINDOW_MS` to change how long it listens (default 2 minutes; `0` runs until Ctrl-C), and `FLOWBUN_DRY_RUN=false` if you're ready to let it make real service calls.
+
+For the real distributed topology instead of the single-process demo:
+
+```sh
+bun run coordinator
+```
+
+This runs the typecheck gate once up front, then spawns one flow-host child process per file in `data/wiring/` (currently `hallway_lights`, `outdoor_temp_demo`, and `flowbun_test` — a small dedicated flow proving a real, non-dry-run HA write via `input_text.flowbun_test` → `input_boolean.flowbun_test`), each with its own Worker per block. Saving a file under `data/blocks/` or `data/wiring/` triggers a debounced reload; `kill -9`-ing a flow-host's pid demonstrates the crash-recovery path. `Ctrl-C` (or a plain `kill`/`pkill`) shuts everything down cleanly, including every child.
 
 See [`spikes/DECISIONS.md`](spikes/DECISIONS.md) for the Phase 0 evidence behind these choices, and the `RESULTS.md` in each `spikes/sN-*/` directory for the full detail behind each one.
 

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
+import type { FlowStatus } from "flowbun/ws";
 import type { HaRelay } from "./ha-relay";
 import type { LogBuffer } from "./log-buffer";
 
@@ -11,19 +12,10 @@ const CRASH_LOOP_WINDOW_MS = 300_000;
 const DEGRADE_ERROR_THRESHOLD = 5;
 const DEGRADE_WINDOW_MS = 60_000;
 
-export type FlowStatus =
-  | { kind: "starting" }
-  | { kind: "running"; pid: number; since: number }
-  | { kind: "degraded"; pid: number; since: number; reason: string }
-  | { kind: "restarting"; attempt: number; nextAttemptAt: number }
-  | {
-      kind: "failed-typecheck";
-      at: number;
-      output: string;
-      stillRunning: boolean;
-      pid?: number;
-    }
-  | { kind: "crash-looped"; at: number; attempts: number };
+// FlowStatus now lives in flowbun/ws (it has to cross the coordinator ->
+// browser boundary); re-exported here so nothing else in coordinator/ needs
+// to change its import.
+export type { FlowStatus };
 
 interface FlowRuntime {
   wiringPath: string;
@@ -42,6 +34,10 @@ export class Supervisor {
     private readonly dataDir: string,
     private readonly haRelay: HaRelay,
     private readonly logBuffer: LogBuffer,
+    private readonly onStatusChange?: (
+      flow: string,
+      status: FlowStatus,
+    ) => void,
   ) {}
 
   async startFlow(wiringPath: string, flowName: string): Promise<void> {
@@ -247,6 +243,7 @@ export class Supervisor {
       `[coordinator] flow "${rt.flowName}" status:`,
       JSON.stringify(status),
     );
+    this.onStatusChange?.(rt.flowName, status);
   }
 
   getStatus(flowName: string): FlowStatus | undefined {

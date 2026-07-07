@@ -1,11 +1,24 @@
 import { z } from "zod";
 
+// This module is deliberately browser-safe (only depends on zod, no Bun/Node
+// builtins) and exposed as its own "flowbun/wiring" subpath for exactly that
+// reason: the editor's client bundle needs Wiring/parsePortRef/WiringSchema,
+// but importing anything from the main "flowbun" barrel (index.ts) pulls in
+// bun:sqlite, @digital-alchemy/hass, and their Node-only transitive deps
+// (child_process, etc.), which fails to bundle for a browser target at all.
+
 const NODE_ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PORT_REF_RE = /^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$/;
+
+const PositionSchema = z.object({ x: z.number(), y: z.number() });
 
 const WiringNodeSchema = z.object({
   block: z.string().min(1),
   config: z.unknown().optional(),
+  // Editor-only (canvas layout) — never reaches LoadedNode/assembleFlow,
+  // meaningless at runtime. Optional so every existing committed wiring
+  // file stays valid without being touched.
+  position: PositionSchema.optional(),
 });
 
 const PortRefSchema = z
