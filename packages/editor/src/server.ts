@@ -19,7 +19,9 @@ Bun.serve({
     // baked into the client bundle at build time — the browser fetches this
     // once on boot; keeps both dev servers independently restartable/movable.
     "/config.json": (req) => {
-      const coordinatorWsUrl = EXPLICIT_COORDINATOR_WS ?? `ws://${new URL(req.url).hostname}:${WS_PORT}/ws`;
+      const coordinatorWsUrl =
+        EXPLICIT_COORDINATOR_WS ??
+        `ws://${new URL(req.url).hostname}:${WS_PORT}/ws`;
       return Response.json({ coordinatorWsUrl });
     },
   },

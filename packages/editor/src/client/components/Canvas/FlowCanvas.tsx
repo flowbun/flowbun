@@ -37,12 +37,14 @@ function Inner({
   palette,
   onOpenBlockEditor,
   onSelectNode,
+  readOnly = false,
 }: {
   file: string;
   wiring: Wiring;
   palette: BlockPaletteEntry[];
   onOpenBlockEditor: (blockFile: string) => void;
   onSelectNode: (nodeId: string | null) => void;
+  readOnly?: boolean;
 }) {
   const { send } = useFlowbunSocket();
   const { nodes: graphNodes, edges: graphEdges } = useFlowGraph(
@@ -177,15 +179,18 @@ function Inner({
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
+      nodesDraggable={!readOnly}
+      nodesConnectable={!readOnly}
+      deleteKeyCode={readOnly ? null : undefined}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
-      onNodeDragStop={onNodeDragStop}
-      onConnect={onConnect}
-      onNodesDelete={onNodesDelete}
-      onEdgesDelete={onEdgesDelete}
-      onDrop={onDrop}
-      onDragOver={onDragOver}
-      onNodeDoubleClick={onNodeDoubleClick}
+      onNodeDragStop={readOnly ? undefined : onNodeDragStop}
+      onConnect={readOnly ? undefined : onConnect}
+      onNodesDelete={readOnly ? undefined : onNodesDelete}
+      onEdgesDelete={readOnly ? undefined : onEdgesDelete}
+      onDrop={readOnly ? undefined : onDrop}
+      onDragOver={readOnly ? undefined : onDragOver}
+      onNodeDoubleClick={readOnly ? undefined : onNodeDoubleClick}
       onNodeClick={(_event, node) => onSelectNode(node.id)}
       onPaneClick={() => onSelectNode(null)}
       colorMode="dark"
@@ -203,6 +208,7 @@ export function FlowCanvas(props: {
   palette: BlockPaletteEntry[];
   onOpenBlockEditor: (blockFile: string) => void;
   onSelectNode: (nodeId: string | null) => void;
+  readOnly?: boolean;
 }) {
   return (
     <ReactFlowProvider>

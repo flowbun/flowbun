@@ -4,11 +4,13 @@ import { useMemo, useState } from "react";
 export function LogPanel({
   logs,
   flows,
+  startCollapsed = false,
 }: {
   logs: LogRecord[];
   flows: string[];
+  startCollapsed?: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(startCollapsed);
   const [flowFilter, setFlowFilter] = useState<string>("");
   const [levelFilter, setLevelFilter] = useState<string>("");
   const [text, setText] = useState("");

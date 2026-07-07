@@ -14,7 +14,9 @@ function spawnChild(name: string, cmd: string[]): void {
     stdio: ["inherit", "inherit", "inherit"],
     onExit(_proc, exitCode, signalCode) {
       if (shuttingDown) return;
-      console.error(`[entrypoint] ${name} exited unexpectedly (code=${exitCode}, signal=${signalCode})`);
+      console.error(
+        `[entrypoint] ${name} exited unexpectedly (code=${exitCode}, signal=${signalCode})`,
+      );
       shutdown(1);
     },
   });
@@ -31,5 +33,13 @@ function shutdown(code: number): void {
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
 
-spawnChild("coordinator", [process.execPath, "run", "packages/coordinator/src/main.ts"]);
-spawnChild("editor", [process.execPath, "run", "packages/editor/src/server.ts"]);
+spawnChild("coordinator", [
+  process.execPath,
+  "run",
+  "packages/coordinator/src/main.ts",
+]);
+spawnChild("editor", [
+  process.execPath,
+  "run",
+  "packages/editor/src/server.ts",
+]);
