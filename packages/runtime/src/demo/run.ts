@@ -87,7 +87,11 @@ async function main(): Promise<void> {
     const unsubscribe = await registerHassTrigger(
       { entity: "binary_sensor.hallway_motion" },
       (payload) => {
-        const traceId = hallwayRouter.ingress("motion", "changed", payload);
+        const traceId = hallwayRouter.emitFromSource(
+          "motion",
+          "changed",
+          payload,
+        );
         hallwayRouter.waitForIdle().then(() => printTrace(traces, traceId));
       },
     );

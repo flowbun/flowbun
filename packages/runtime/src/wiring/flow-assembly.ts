@@ -7,8 +7,10 @@ import { parsePortRef } from "./schema";
 
 export interface BlockRegistryEntry {
   def: AnyBlockDef;
-  /** Import specifier used for typecheck-glue generation, e.g. "../../data/blocks/debounce" or "flowbun/hass/trigger". */
+  /** Import specifier used for typecheck-glue generation, relative to <dataDir>/generated, e.g. "../blocks/debounce" or "flowbun/hass/trigger". */
   specifier: string;
+  /** Real, absolute (for user blocks) import()-able path — what a flow-host Worker actually loads. */
+  modulePath: string;
 }
 
 /** Keyed by block name as referenced in wiring JSON, e.g. "debounce" or "@hass/trigger". */
@@ -40,6 +42,7 @@ export function assembleFlow(
       nodeId,
       block: entry.def,
       blockSpecifier: entry.specifier,
+      blockModulePath: entry.modulePath,
       config,
       blockState: makeStateScope(
         db,

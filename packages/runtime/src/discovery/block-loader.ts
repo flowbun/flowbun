@@ -23,13 +23,18 @@ function isBlockDef(
 /** Scans `<dataDir>/blocks/*.ts`, dynamic-importing each and registering the two built-in @hass/* blocks. */
 export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
   const registry: BlockRegistry = new Map();
+  // modulePath is unreachable in practice for these two — the flow-host
+  // never spawns a Worker for @hass/* nodes (see DistributedExecutor) — kept
+  // populated only for symmetry with user blocks.
   registry.set("@hass/trigger", {
     def: hassTrigger,
     specifier: "flowbun/hass/trigger",
+    modulePath: "flowbun/hass/trigger",
   });
   registry.set("@hass/action", {
     def: hassAction,
     specifier: "flowbun/hass/action",
+    modulePath: "flowbun/hass/action",
   });
 
   const blocksDir = join(dataDir, "blocks");
@@ -50,6 +55,7 @@ export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
       specifier: relSpecifier.startsWith(".")
         ? relSpecifier
         : `./${relSpecifier}`,
+      modulePath: absPath,
     });
   }
 

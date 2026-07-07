@@ -6,7 +6,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./hass/trigger": "./src/hass/trigger.ts",
-    "./hass/action": "./src/hass/action.ts"
+    "./hass/action": "./src/hass/action.ts",
+    "./hass/client": "./src/hass/client.ts",
+    "./ipc": "./src/ipc/protocol.ts"
   },
   "dependencies": {
     "zod": "^4.1.0",

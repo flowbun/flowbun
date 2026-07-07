@@ -1,3 +1,8 @@
+# GUI git clients (VS Code's Source Control panel, etc.) invoke hooks with a
+# minimal PATH that skips shell-profile sourcing, so bun's default install
+# location isn't necessarily there even though it is in an interactive shell.
+export PATH="$HOME/.bun/bin:$PATH"
+
 echo "pre-commit: running lint (biome check .)..."
 if ! bun run lint; then
   echo ""

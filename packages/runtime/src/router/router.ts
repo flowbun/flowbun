@@ -1,4 +1,5 @@
-import type { BlockContext, Logger } from "../block";
+import type { Logger } from "../block";
+import { InProcessExecutor, type NodeExecutor } from "./executor";
 import type { Envelope, LoadedFlow, QueuedDelivery } from "./types";
 
 /**
@@ -14,13 +15,17 @@ export class Router {
   private seq = 0;
   private queue: QueuedDelivery[] = [];
   private drainPromise: Promise<void> | null = null;
+  private readonly executor: NodeExecutor;
 
   constructor(
     private readonly flow: LoadedFlow,
     private readonly log: Logger,
-  ) {}
+    executor?: NodeExecutor,
+  ) {
+    this.executor = executor ?? new InProcessExecutor(flow, log);
+  }
 
-  /** External entry point: trigger blocks / a demo runner call this to inject a message. */
+  /** External entry point: a demo runner / test harness calls this to inject a payload directly into a real node's real input port. */
   ingress(
     nodeId: string,
     port: string,
@@ -29,6 +34,28 @@ export class Router {
   ): string {
     const tid = traceId ?? crypto.randomUUID();
     this.enqueue(nodeId, port, payload, tid, null);
+    return tid;
+  }
+
+  /**
+   * External entry point for source nodes (@hass/trigger) whose payload was
+   * produced at an OUTPUT port, not received at an input — fans out to
+   * whatever's wired to `sourceNodeId.sourcePort`, exactly like deliver()'s
+   * own post-process fan-out, rather than trying to invoke the source node's
+   * own (nonexistent/no-op) process(). Using `ingress()` for this was a
+   * latent bug: it silently no-op'd against Phase 1's in-process executor
+   * (@hass/trigger's process() is a documented no-op) and only surfaced as a
+   * hard failure once Phase 2's DistributedExecutor required every ordinary
+   * node to have a live Worker.
+   */
+  emitFromSource(
+    nodeId: string,
+    port: string,
+    payload: unknown,
+    traceId?: string,
+  ): string {
+    const tid = traceId ?? crypto.randomUUID();
+    this.fanOut(nodeId, port, payload, tid, null);
     return tid;
   }
 
@@ -82,20 +109,6 @@ export class Router {
       return;
     }
 
-    const ctx: BlockContext = {
-      config: inst.config,
-      state: {
-        block: inst.blockState,
-        flow: this.flow.flowState,
-        global: this.flow.globalState,
-      },
-      log: this.log,
-      traceId: item.envelope.traceId,
-      seq: item.envelope.seq,
-      port: item.port,
-    };
-    const inputs = { [item.port]: item.payload };
-
     this.log.info("router.deliver", {
       flow: this.flow.name,
       node: item.nodeId,
@@ -109,7 +122,13 @@ export class Router {
 
     let outputs: Record<string, unknown> | undefined;
     try {
-      outputs = await inst.block.process(inputs, ctx);
+      outputs = await this.executor.execute({
+        nodeId: item.nodeId,
+        inputs: { [item.port]: item.payload },
+        port: item.port,
+        traceId: item.envelope.traceId,
+        seq: item.envelope.seq,
+      });
     } catch (err) {
       this.log.error("router.block_threw", {
         flow: this.flow.name,
@@ -131,17 +150,34 @@ export class Router {
 
     for (const [outPort, value] of Object.entries(outputs)) {
       if (value === undefined) continue;
-      const destinations =
-        this.flow.wireIndex.get(`${item.nodeId}.${outPort}`) ?? [];
-      for (const dest of destinations) {
-        this.enqueue(
-          dest.nodeId,
-          dest.port,
-          structuredClone(value),
-          item.envelope.traceId,
-          item.envelope.seq,
-        );
-      }
+      this.fanOut(
+        item.nodeId,
+        outPort,
+        value,
+        item.envelope.traceId,
+        item.envelope.seq,
+      );
+    }
+  }
+
+  /** Enqueues `value` to every node wired to `sourceNodeId.sourcePort`. Shared by deliver()'s post-process fan-out and emitFromSource(). */
+  private fanOut(
+    sourceNodeId: string,
+    sourcePort: string,
+    value: unknown,
+    traceId: string,
+    causationSeq: number | null,
+  ): void {
+    const destinations =
+      this.flow.wireIndex.get(`${sourceNodeId}.${sourcePort}`) ?? [];
+    for (const dest of destinations) {
+      this.enqueue(
+        dest.nodeId,
+        dest.port,
+        structuredClone(value),
+        traceId,
+        causationSeq,
+      );
     }
   }
 }

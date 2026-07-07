@@ -32,9 +32,18 @@ export interface BlockDef<
   config: Config;
   inputs: Inputs;
   outputs: Outputs;
+  // `void` here is load-bearing, not stylistic: a block's `process` typically
+  // has no explicit return-type annotation, so a body that only ever falls
+  // through / bare-`return`s (see hass/action.ts) gets inferred as
+  // `Promise<void>` — and `Promise<void>` is NOT assignable to
+  // `Promise<Partial<Outputs> | undefined>` (void's assignability is
+  // one-directional). Swapping this to `undefined` breaks the typecheck gate
+  // for exactly the blocks that don't emit on every path — verified by
+  // actually running the gate, not just by reasoning about it.
   process(
     inputs: Inputs,
     ctx: BlockContext<Config>,
+    // biome-ignore lint/suspicious/noConfusingVoidType: intentional, see comment above
   ): Promise<Partial<Outputs> | void>;
 }
 

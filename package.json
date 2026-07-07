@@ -9,6 +9,7 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "demo:hallway": "bun run packages/runtime/src/demo/run.ts",
+    "coordinator": "bun run packages/coordinator/src/main.ts",
     "prepare": "husky"
   },
   "dependencies": {

@@ -18,6 +18,7 @@ export interface LoadedNode {
   nodeId: string;
   block: AnyBlockDef;
   blockSpecifier: string;
+  blockModulePath: string;
   config: unknown;
   blockState: StateScope;
 }
