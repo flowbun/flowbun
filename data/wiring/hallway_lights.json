@@ -1,0 +1,20 @@
+{
+  "name": "hallway_lights",
+  "nodes": {
+    "motion": {
+      "block": "@hass/trigger",
+      "config": { "entity": "binary_sensor.hallway_motion" }
+    },
+    "settle": { "block": "debounce", "config": { "ms": 30000 } },
+    "decide": {
+      "block": "presence_logic",
+      "config": { "entity": "light.hallway" }
+    },
+    "lights": { "block": "@hass/action", "config": {} }
+  },
+  "wires": [
+    ["motion.changed", "settle.signal"],
+    ["settle.stable", "decide.presence"],
+    ["decide.command", "lights.call"]
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "flowbun",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./hass/trigger": "./src/hass/trigger.ts",
+    "./hass/action": "./src/hass/action.ts"
+  },
+  "dependencies": {
+    "zod": "^4.1.0",
+    "@digital-alchemy/hass": "^26.6.13"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}
