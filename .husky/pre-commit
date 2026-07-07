@@ -1,0 +1,7 @@
+echo "pre-commit: running lint (biome check .)..."
+if ! bun run lint; then
+  echo ""
+  echo "pre-commit: lint failed — commit blocked."
+  echo "Run 'bunx biome check --write .' to auto-fix what can be, then re-stage and commit again."
+  exit 1
+fi

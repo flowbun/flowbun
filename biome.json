@@ -1,12 +1,12 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.2/schema.json",
   "files": {
-    "includes": ["**", "!spikes/**", "!data/generated/**"]
+    "includes": ["**", "!spikes", "!data/generated"]
   },
   "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "linter": {
     "enabled": true,
-    "rules": { "recommended": true }
+    "rules": { "preset": "recommended" }
   },
   "formatter": {
     "enabled": true,

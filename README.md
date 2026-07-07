@@ -116,3 +116,7 @@ bun run demo:hallway
 This discovers the blocks in `data/blocks/`, validates and typechecks every flow in `data/wiring/`, then runs both example flows: `outdoor_temp_demo` (a real, Zod-validated fetch to a public weather API) and `hallway_lights` (a real, read-only subscription to a Home Assistant motion sensor, feeding `debounce → presence_logic → @hass/action`, with the final light command logged in dry-run rather than executed). Set `FLOWBUN_DEMO_WINDOW_MS` to change how long it listens (default 2 minutes; `0` runs until Ctrl-C), and `FLOWBUN_DRY_RUN=false` if you're ready to let it make real service calls.
 
 See [`spikes/DECISIONS.md`](spikes/DECISIONS.md) for the Phase 0 evidence behind these choices, and the `RESULTS.md` in each `spikes/sN-*/` directory for the full detail behind each one.
+
+## Development
+
+Lint/format is [Biome](https://biomejs.dev/); `bun run lint` / `bun run format` run it directly. A [husky](https://typicode.github.io/husky/) pre-commit hook (`.husky/pre-commit`) runs the lint check and blocks the commit on failure — it's wired up automatically by `bun install` (via the root package's `prepare` script), no manual setup needed after cloning.
