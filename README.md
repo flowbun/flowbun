@@ -14,7 +14,7 @@ A flow-based home automation runtime: functional core, TypeScript everywhere, Bu
 
 [Digital Alchemy](https://github.com/Digital-Alchemy-TS) proves the alternative — typed TypeScript against your actual Home Assistant instance — is a genuinely nice experience. But it has no visual layer, and hand-rolled automations lose the at-a-glance topology a flow graph gives you.
 
-Flowbun is the synthesis: a small [flow-based programming](https://en.wikipedia.org/wiki/Flow-based_programming)-style runtime where blocks are pure(-ish) async TypeScript functions, wiring is data (plain JSON, human-diffable, git-friendly), effects live strictly at the boundary, and the visual editor (not yet built — see [Status](#status)) is optional sugar over the same plaintext files a human or an IDE can edit directly.
+Flowbun is the synthesis: a small [flow-based programming](https://en.wikipedia.org/wiki/Flow-based_programming)-style runtime where blocks are pure(-ish) async TypeScript functions, wiring is data (plain JSON, human-diffable, git-friendly), effects live strictly at the boundary, and the visual editor is optional sugar over the same plaintext files a human or an IDE can edit directly — the editor has no privileged access; anything it can do, a `curl`/`websocat` script could do too.
 
 ## Status
 
@@ -23,8 +23,8 @@ This repo is a proof-of-concept, built in phases:
 - **Phase 0 — spikes** (done): six throwaway experiments answering the risky unknowns before committing to an architecture — Bun `Worker` behavior under load, `Bun.spawn` IPC, `@digital-alchemy/hass` embedded outside a full DA app, typecheck-on-reload latency, multi-process SQLite, and `fs.watch` on a container bind mount. Full writeups and measured evidence are in [`spikes/`](spikes/), rolled up in [`spikes/DECISIONS.md`](spikes/DECISIONS.md).
 - **Phase 1 — headless core runtime** (done): the actual engine — `defineBlock`, block discovery, the wiring format, the router, three-scope state, the typecheck gate, and the Home Assistant boundary blocks — running in a single process with the simplest possible transport (plain async calls). This is what's in [`packages/runtime`](packages/runtime), exercised by the in-process demo (`bun run demo:hallway`) and the example flows in [`data/`](data).
 - **Phase 2 — distribution and supervision** (done): the real topology — a [`packages/coordinator`](packages/coordinator) process holding the only Home Assistant connection, one [`packages/flow-host`](packages/flow-host) child process per flow, one Worker per block instance, crash recovery with backoff/crash-loop detection, and a debounced real-`fs.watch` reload pipeline that typechecks before ever touching a running process. Verified live against a real HA instance: `kill -9`-ing a flow-host self-heals with state intact, a broken block type leaves every other flow untouched, and a dedicated test flow proved a real (non-dry-run) HA write end-to-end.
-- **Phase 3 — editor** (in progress): a browser UI (React Flow + Monaco) that reads and writes the same wiring/block files, live over a websocket.
-- **Phase 4 — packaging** (not started): containerization, and porting one real automation each from an existing Node-RED and HASS-native setup as the acid test.
+- **Phase 3 — editor** (done): a browser UI ([`packages/editor`](packages/editor), React Flow + Monaco) that is a pure client of a new websocket control API on the coordinator ([`flowbun/ws`](packages/runtime/src/ws/protocol.ts)). Built and verified in the order the design called for: a read-only live canvas that reflects on-disk wiring in real time, structured logs piped unconditionally to devtools, minimal-diff write-back editing (drag, config edits, add/remove nodes and wires), and Monaco-based block source editing with real `tsc` output surfaced live on save. Verified end-to-end with headless-browser automation (Playwright) against the real coordinator/flow-host topology, including a genuine concurrency bug (overlapping reloads from rapid successive edits) found and fixed this way.
+- **Phase 4 — packaging** (demo container done, acid test not started): a `Dockerfile` + entrypoint runs the coordinator and editor as sibling processes in one container (see [Running it](#running-it)). Porting one real automation each from an existing Node-RED and HASS-native setup, as the acid test, is still outstanding.
 
 "The runtime" below means [`packages/runtime`](packages/runtime) — the engine shared by every topology. Phase 1's in-process demo and Phase 2's distributed coordinator/flow-host/Worker topology both run the exact same `Router`, block format, and typecheck gate; they differ only in which `NodeExecutor` the `Router` is given (see [Architecture](#architecture)).
 
@@ -43,7 +43,8 @@ flowbun/
         typecheck/                  # generates and runs the synthetic wire-assertion file (see below)
         hass/                         # the only code allowed to talk to Home Assistant
         ipc/                            # message types shared between coordinator and flow-host
-        demo/                             # the in-process headless milestone runner (Phase 1)
+        ws/                               # flowbun/ws — the websocket protocol shared with the browser editor
+        demo/                               # the in-process headless milestone runner (Phase 1)
     flow-host/          # one OS process per flow — the real topology's per-flow half
       src/
         main.ts            # entrypoint: assembles its one flow, wires IPC to the coordinator
@@ -52,17 +53,34 @@ flowbun/
         distributed-executor.ts    # NodeExecutor: Workers for ordinary nodes, IPC relay for @hass/action
     coordinator/        # the long-lived parent — the real topology's supervisory half
       src/
-        main.ts            # entrypoint: initial typecheck, spawns every flow, starts the watcher
+        main.ts            # entrypoint: initial typecheck, spawns every flow, starts the watcher, starts the ws server
         supervisor.ts         # spawn/restart/backoff/crash-loop/status per flow
         ha-relay.ts              # the only place the real Home Assistant connection is opened
         watcher.ts                 # debounced real fs.watch -> reload decisions
-        log-buffer.ts                # bounded ring buffer for structured logs forwarded from flow-hosts
-  data/                 # a real flowbun "data directory" — what would be bind-mounted in production
+        log-buffer.ts                # bounded ring buffer for structured logs, with live subscribe/unsubscribe
+        wiring-writer.ts               # minimal-diff wiring edits via jsonc-parser (see below)
+        ws-server.ts                      # the flowbun/ws server: snapshot on connect, mutation commands
+    editor/             # the browser UI — a pure client of the coordinator's websocket API
+      src/
+        server.ts          # Bun native HTML-import dev server + a /config.json endpoint for the ws URL
+        client/
+          ws/FlowbunSocketContext.tsx  # the one websocket connection, request/response correlation, reducer
+          devtools-console.ts            # every LogRecord unconditionally logged to devtools console
+          layout/auto-layout.ts            # BFS longest-path layering for nodes with no saved position
+          components/
+            Canvas/          # React Flow canvas: nodes/edges from wiring, drag/connect/delete -> mutations
+            Palette/            # block palette + per-block config form
+            LogPanel/              # live structured log viewer
+            BlockEditor/              # Monaco block-source editing with live typecheck error surfacing
+            StatusBar/                  # per-flow status badges (running/restarting/failed-typecheck/...)
+  data/                 # a real flowbun "data directory" — bind-mounted into the container, not baked in
     blocks/               # one .ts file per block type, written against `flowbun`
     wiring/                 # one <flow-name>.json per flow — the actual source of truth
     state/                    # flowbun.sqlite (gitignored) — created at runtime
     generated/                  # typecheck glue (gitignored) — regenerated on every load
   spikes/               # Phase 0 throwaway experiments, kept for reference — not maintained code
+  Dockerfile            # oven/bun base; bundles coordinator + editor into one image (data/ excluded — see below)
+  docker-entrypoint.ts  # runs coordinator + editor as sibling processes; either dying kills the container
 ```
 
 A quirk worth explaining: the root `package.json` is named `flowbun-workspace`, not `flowbun` — the actual `flowbun` package (the one `data/blocks/*.ts` files `import { defineBlock } from "flowbun"` against) is `packages/runtime`. Bun workspaces symlinks it in, but only because the root package explicitly depends on it (`"flowbun": "workspace:*"`) — the root package needing to *consume* its own workspace member is what forces the naming split.
@@ -129,6 +147,16 @@ State is explicitly *not* purely functional — it's `bun:sqlite` in WAL mode, w
 
 Every hop between blocks clones the payload, even in Phase 1's single-process demo, which could otherwise get away with passing references. This was deliberate ahead of time: it keeps a block's mutation of its own inputs from ever silently corrupting a sibling branch's copy of the same message, and it meant Phase 2 — where some of these hops became real Worker `postMessage`/IPC boundaries with unavoidable serialization — needed zero changes to block-author-visible behavior. Confirmed, not just planned: the same block code runs unmodified in both topologies.
 
+### The editor has no privileged access, and writes are minimal-diff, not regenerated
+
+The browser editor talks to the coordinator over a single websocket ([`flowbun/ws`](packages/runtime/src/ws/protocol.ts)): fire-and-forget pushes for state the server always knows more about than any one client (a `snapshot` on connect, then `flow.updated`/`flow.status`/`log` broadcasts), and `requestId`-correlated request/response for anything that mutates something (`wiring.mutate`, `block.write`, `flow.restart`). There is no separate privileged API — every mutation re-reads the target file fresh from disk, applies the change, re-typechecks, and only then restarts the affected flow, which is exactly what a human editing the file directly and re-running the coordinator would cause.
+
+Saving a wiring edit does **not** regenerate the file from the in-memory object. An early attempt at `JSON.stringify(wiring, null, 2)` reformatted with Biome still failed to reproduce the file's existing mix of inline and expanded objects — Biome preserves whichever bracket style is already on disk, it doesn't compute one from content. Instead, [`wiring-writer.ts`](packages/coordinator/src/wiring-writer.ts) uses [`jsonc-parser`](https://github.com/microsoft/node-jsonc-parser) (the same library VS Code uses to edit your `settings.json`) to patch only the specific JSON path that changed — a no-op produces byte-identical output, a config edit is a single-token replacement, a node deletion removes exactly that node's text. The one accepted limitation: adding a brand-new node or wire re-expands whichever sibling immediately precedes the insertion point (an unavoidable consequence of emitting "prev-prop + comma + new-prop" as one edit) — bounded to one adjacent sibling, never file-wide, and it doesn't affect the common drag/config-edit operations.
+
+### A second package-export subpath, because the browser can't import `bun:sqlite`
+
+The editor's client bundle needs `Wiring`/`parsePortRef` types and the `flowbun/ws` protocol types, but importing anything from the main `flowbun` barrel — even a pure function — transitively pulls in `bun:sqlite` and `@digital-alchemy/hass`'s Node-only dependencies, which fail outright in a browser bundle. The fix is `flowbun/wiring`, a separate `package.json` export pointing directly at `wiring/schema.ts` (which depends on nothing but `zod`), so the editor imports `Wiring`/`parsePortRef` from there and the main runtime package stays exactly as Node/Bun-only as it needs to be.
+
 ## Running it
 
 ```sh
@@ -145,9 +173,38 @@ For the real distributed topology instead of the single-process demo:
 bun run coordinator
 ```
 
-This runs the typecheck gate once up front, then spawns one flow-host child process per file in `data/wiring/` (currently `hallway_lights`, `outdoor_temp_demo`, and `flowbun_test` — a small dedicated flow proving a real, non-dry-run HA write via `input_text.flowbun_test` → `input_boolean.flowbun_test`), each with its own Worker per block. Saving a file under `data/blocks/` or `data/wiring/` triggers a debounced reload; `kill -9`-ing a flow-host's pid demonstrates the crash-recovery path. `Ctrl-C` (or a plain `kill`/`pkill`) shuts everything down cleanly, including every child.
+This runs the typecheck gate once up front, then spawns one flow-host child process per file in `data/wiring/` (currently `hallway_lights`, `outdoor_temp_demo`, and `flowbun_test` — a small dedicated flow proving a real, non-dry-run HA write via `input_text.flowbun_test` → `input_boolean.flowbun_test`), each with its own Worker per block. Saving a file under `data/blocks/` or `data/wiring/` triggers a debounced reload; `kill -9`-ing a flow-host's pid demonstrates the crash-recovery path. `Ctrl-C` (or a plain `kill`/`pkill`) shuts everything down cleanly, including every child. The coordinator also opens a websocket control API on port `8787` (`FLOWBUN_WS_PORT`) as soon as it's up.
+
+For the browser editor, alongside the coordinator:
+
+```sh
+bun run editor
+```
+
+Open `http://localhost:4200`. The editor is a static/dev server plus one `/config.json` endpoint that tells the browser which coordinator websocket to connect to — it derives that address from whatever host/IP the browser used to reach the page itself (not a hardcoded `localhost`), so the same build works whether you're on the machine running it or reaching it over the LAN (see [Docker](#docker), below). Set `FLOWBUN_COORDINATOR_WS` to override this explicitly.
 
 See [`spikes/DECISIONS.md`](spikes/DECISIONS.md) for the Phase 0 evidence behind these choices, and the `RESULTS.md` in each `spikes/sN-*/` directory for the full detail behind each one.
+
+## Docker
+
+A `Dockerfile` bundles the coordinator and editor into one image (`docker-entrypoint.ts` runs them as sibling processes; either one dying kills the container, so a restart policy can recover it rather than it running half-broken). Build with either engine:
+
+```sh
+docker build -t flowbun:demo .
+# or: podman build -t flowbun:demo .
+```
+
+Run it with `data/` bind-mounted (so wiring/blocks stay editable and persist across container restarts — nothing under `data/` is baked into the image) and your real `HASS_BASE_URL`/`HASS_TOKEN` passed at run time, never built into a layer:
+
+```sh
+docker run -d --name flowbun-demo \
+  -p 4200:4200 -p 8787:8787 \
+  -v "$(pwd)/data:/app/data" \
+  --env-file .env \
+  flowbun:demo
+```
+
+Then open `http://<host>:4200` — including from another machine on the LAN, since the `/config.json` host-derivation described above means the published port just works without extra configuration. `FLOWBUN_DRY_RUN=true` is the image's baked-in default, so a container started with no other configuration can never make a real Home Assistant write.
 
 ## Development
 

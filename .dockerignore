@@ -1,0 +1,10 @@
+node_modules
+**/node_modules
+.git
+.env
+spikes
+data
+*.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
