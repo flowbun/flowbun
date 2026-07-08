@@ -90,6 +90,37 @@ describe("applyMutation round-trip fidelity", () => {
     expect(parsed.nodes.lights).toEqual(JSON.parse(original).nodes.lights);
   });
 
+  test("node.disabled: true adds the field, false removes it entirely", () => {
+    const original = readFileSync(FILE, "utf8");
+    expect(JSON.parse(original).nodes.settle.disabled).toBeUndefined();
+
+    const disabled = applyMutation(original, {
+      op: "node.disabled",
+      nodeId: "settle",
+      disabled: true,
+    });
+    expect(JSON.parse(disabled).nodes.settle.disabled).toBe(true);
+
+    const reenabled = applyMutation(disabled, {
+      op: "node.disabled",
+      nodeId: "settle",
+      disabled: false,
+    });
+    // Removed entirely, not left as a literal `false`. Per this module's
+    // documented limitation, adding "disabled" to a node with no prior
+    // multi-line structure expanded that node's own formatting (verified
+    // above) — removing it again doesn't collapse it back to inline (same
+    // as `position`'s equivalent case), but every OTHER node is untouched.
+    expect(JSON.parse(reenabled).nodes.settle.disabled).toBeUndefined();
+    expect(JSON.parse(reenabled).nodes.settle.block).toBe("debounce");
+    expect(JSON.parse(reenabled).nodes.motion).toEqual(
+      JSON.parse(original).nodes.motion,
+    );
+    expect(JSON.parse(reenabled).nodes.decide).toEqual(
+      JSON.parse(original).nodes.decide,
+    );
+  });
+
   test("node.remove cascades wire removal and leaves other nodes/wires untouched", () => {
     const original = readFileSync(FILE, "utf8");
     const mutated = applyMutation(original, {
@@ -117,6 +148,49 @@ describe("applyMutation round-trip fidelity", () => {
       to: "settle.signal",
     });
     expect(twice).toBe(once);
+  });
+
+  test("node.remove cascading two wires on a single-line wires array produces valid JSON", () => {
+    // Regression test for a real jsonc-parser@3.3.1 bug: removing wire
+    // array elements one at a time by index corrupted the output (a stray
+    // extra "]") specifically when the removal touched what was currently
+    // the last element of a single-line array — exactly the shape
+    // committed wiring files use. Found via the browser UI's node-delete
+    // button, reproduced directly against jsonc-parser outside this repo.
+    const original = `{
+  "name": "test",
+  "nodes": {
+    "a": { "block": "x" },
+    "b": { "block": "y" },
+    "c": { "block": "z" }
+  },
+  "wires": [["a.out", "b.in"], ["b.out", "c.in"]]
+}
+`;
+    const mutated = applyMutation(original, {
+      op: "node.remove",
+      nodeId: "b",
+    });
+    expect(() => JSON.parse(mutated)).not.toThrow();
+    const parsed = JSON.parse(mutated);
+    expect(parsed.nodes.b).toBeUndefined();
+    expect(parsed.wires).toEqual([]);
+  });
+
+  test("wire.remove of the last wire in a single-line array produces valid JSON", () => {
+    const original = `{
+  "name": "test",
+  "nodes": { "a": { "block": "x" }, "b": { "block": "y" } },
+  "wires": [["a.out", "b.in"]]
+}
+`;
+    const mutated = applyMutation(original, {
+      op: "wire.remove",
+      from: "a.out",
+      to: "b.in",
+    });
+    expect(() => JSON.parse(mutated)).not.toThrow();
+    expect(JSON.parse(mutated).wires).toEqual([]);
   });
 
   test("node.config on a nonexistent node throws rather than silently creating an invalid node", () => {

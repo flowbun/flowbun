@@ -9,18 +9,24 @@ import type {
   ServerToClient,
   TypecheckOutcome,
 } from "flowbun/ws";
+import { formatWithBiome } from "./format-block";
 import type { LogBuffer } from "./log-buffer";
 import type { Supervisor } from "./supervisor";
+import type { UndoStack } from "./undo-stack";
 import { applyMutation, WiringWriteError } from "./wiring-writer";
 
 export interface WsServerDeps {
   dataDir: string;
+  /** Repo root (biome.json + node_modules live here) — used only to format
+   * block source on save. */
+  repoRoot: string;
   supervisor: Supervisor;
   logBuffer: LogBuffer;
   /** Live view of every known wiring file — main.ts owns this Map and keeps
    * it current across reloads; both fs-watcher-triggered and ws-triggered
    * reloads write through it. */
   flows: Map<string, FlowEntry>;
+  undoStack: UndoStack;
   getPalette: () => BlockPaletteEntry[];
   reloadWiringFile: (path: string) => Promise<TypecheckOutcome>;
   reloadBlocksAndRestartAll: () => Promise<TypecheckOutcome>;
@@ -91,6 +97,7 @@ export function startWsServer(port: number, deps: WsServerDeps) {
               const path = join(deps.dataDir, "wiring", msg.file);
               const currentText = readFileSync(path, "utf8");
               const nextText = applyMutation(currentText, msg.mutation);
+              deps.undoStack.beforeMutate(msg.file, currentText);
               writeFileSync(path, nextText);
               const typecheck = await deps.reloadWiringFile(path);
               const updated = deps.flows.get(msg.file);
@@ -111,17 +118,67 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             }
             break;
           }
+          case "wiring.undo":
+          case "wiring.redo": {
+            const resultType =
+              msg.type === "wiring.undo"
+                ? "wiring.undoResult"
+                : "wiring.redoResult";
+            try {
+              const entry = deps.flows.get(msg.file);
+              if (!entry)
+                throw new WiringWriteError(`unknown wiring file "${msg.file}"`);
+              const path = join(deps.dataDir, "wiring", msg.file);
+              const currentText = readFileSync(path, "utf8");
+              const restoredText =
+                msg.type === "wiring.undo"
+                  ? deps.undoStack.undo(msg.file, currentText)
+                  : deps.undoStack.redo(msg.file, currentText);
+              if (restoredText === undefined) {
+                throw new WiringWriteError(
+                  msg.type === "wiring.undo"
+                    ? "nothing to undo"
+                    : "nothing to redo",
+                );
+              }
+              writeFileSync(path, restoredText);
+              const typecheck = await deps.reloadWiringFile(path);
+              const updated = deps.flows.get(msg.file);
+              reply({
+                type: resultType,
+                requestId: msg.requestId,
+                ok: true,
+                wiring: updated ? updated.wiring : JSON.parse(restoredText),
+                typecheck,
+              });
+            } catch (err) {
+              reply({
+                type: resultType,
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
           case "block.write": {
             try {
               if (!isSafeBlockFilename(msg.file))
                 throw new Error(`invalid block filename "${msg.file}"`);
-              writeFileSync(join(deps.dataDir, "blocks", msg.file), msg.source);
+              const path = join(deps.dataDir, "blocks", msg.file);
+              const formatted = await formatWithBiome(
+                msg.source,
+                relative(deps.repoRoot, path),
+                deps.repoRoot,
+              );
+              writeFileSync(path, formatted);
               const typecheck = await deps.reloadBlocksAndRestartAll();
               reply({
                 type: "block.writeResult",
                 requestId: msg.requestId,
                 ok: true,
                 typecheck,
+                source: formatted,
               });
             } catch (err) {
               reply({

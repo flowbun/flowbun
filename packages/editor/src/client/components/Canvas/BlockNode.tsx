@@ -11,11 +11,12 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
     <div
       style={{
         background: "var(--bg-elevated)",
-        border: "1px solid var(--border)",
+        border: `1px ${data.disabled ? "dashed" : "solid"} var(--border)`,
         borderRadius: 6,
         minWidth: 140,
         color: "var(--text)",
         fontSize: 12,
+        opacity: data.disabled ? 0.5 : 1,
       }}
     >
       <div
@@ -26,9 +27,28 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
               ? "1px solid var(--border)"
               : "none",
           fontWeight: 600,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
         }}
       >
         {data.nodeId}
+        {data.disabled && (
+          <span
+            style={{
+              fontSize: 9,
+              fontWeight: 500,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+              color: "var(--text-dim)",
+              border: "1px solid var(--border)",
+              borderRadius: 3,
+              padding: "1px 4px",
+            }}
+          >
+            disabled
+          </span>
+        )}
       </div>
       <div
         style={{

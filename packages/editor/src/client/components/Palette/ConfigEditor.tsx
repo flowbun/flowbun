@@ -1,24 +1,37 @@
+import type { BlockPaletteEntry } from "flowbun/ws";
 import { useState } from "react";
 
 /**
  * One form control per key of the block's defaultConfig, picked by
  * `typeof` the default value — deliberately simple and functional, not a
  * design showcase (per the plan: config editing is the least important
- * piece of the write-back story).
+ * piece of the write-back story). Responsive: a floating panel on desktop,
+ * a full-width bottom sheet on mobile (see styles.css).
  */
 export function ConfigEditor({
   nodeId,
+  block,
   config,
-  defaultConfig,
+  def,
+  disabled,
+  onToggleDisabled,
   onSave,
   onClose,
+  onDelete,
+  onOpenBlockEditor,
 }: {
   nodeId: string;
+  block: string;
   config: unknown;
-  defaultConfig: unknown;
+  def: BlockPaletteEntry | undefined;
+  disabled: boolean;
+  onToggleDisabled: (next: boolean) => void;
   onSave: (config: unknown) => void;
   onClose: () => void;
+  onDelete: () => void;
+  onOpenBlockEditor: (blockFile: string) => void;
 }) {
+  const defaultConfig = def?.defaultConfig;
   const base = (config ?? defaultConfig ?? {}) as Record<string, unknown>;
   const template = (defaultConfig ?? {}) as Record<string, unknown>;
   const [values, setValues] = useState<Record<string, unknown>>(base);
@@ -32,41 +45,51 @@ export function ConfigEditor({
       ? Object.keys(template)
       : Object.keys(base);
 
+  const inputs = def ? Object.keys(def.inputs) : [];
+  const outputs = def ? Object.keys(def.outputs) : [];
+  const sourceFile = def?.file;
+
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 12,
-        right: 12,
-        width: 260,
-        background: "var(--bg-elevated)",
-        border: "1px solid var(--border)",
-        borderRadius: 6,
-        padding: 12,
-        zIndex: 10,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginBottom: 8,
-        }}
-      >
-        <strong>{nodeId} config</strong>
-        <button
-          type="button"
-          onClick={onClose}
-          style={{
-            background: "none",
-            border: "none",
-            color: "var(--text-dim)",
-            cursor: "pointer",
-          }}
-        >
-          ✕
-        </button>
+    <div className="node-config-panel">
+      <div className="node-config-header">
+        <div>
+          <strong>{nodeId}</strong>
+          <div className="node-config-block">{block}</div>
+        </div>
+        <div className="node-config-header-actions">
+          {sourceFile && (
+            <button
+              type="button"
+              onClick={() => onOpenBlockEditor(sourceFile)}
+              title="Edit source"
+              aria-label="Edit source"
+            >
+              ✎
+            </button>
+          )}
+          <button type="button" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
       </div>
+
+      <label className="node-config-enabled-toggle">
+        <input
+          type="checkbox"
+          checked={!disabled}
+          onChange={(e) => onToggleDisabled(!e.target.checked)}
+        />
+        {disabled ? "Disabled" : "Enabled"}
+      </label>
+
+      <div className="node-config-section">
+        <h4>Ports</h4>
+        <div className="node-config-ports">
+          <span>in: {inputs.join(", ") || "—"}</span>
+          <span>out: {outputs.join(", ") || "—"}</span>
+        </div>
+      </div>
+
       <div className="config-form">
         {keys.length === 0 && (
           <div style={{ color: "var(--text-dim)" }}>No config fields.</div>
@@ -122,21 +145,19 @@ export function ConfigEditor({
           );
         })}
       </div>
-      <button
-        type="button"
-        onClick={() => onSave(values)}
-        style={{
-          background: "var(--accent-dim)",
-          color: "var(--text)",
-          border: "1px solid var(--accent)",
-          borderRadius: 6,
-          padding: "6px 12px",
-          cursor: "pointer",
-          width: "100%",
-        }}
-      >
-        Save
-      </button>
+
+      <div className="node-config-actions">
+        <button
+          type="button"
+          className="node-config-save"
+          onClick={() => onSave(values)}
+        >
+          Save
+        </button>
+        <button type="button" className="node-config-delete" onClick={onDelete}>
+          Delete node
+        </button>
+      </div>
     </div>
   );
 }

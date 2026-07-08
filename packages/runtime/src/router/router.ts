@@ -108,6 +108,13 @@ export class Router {
       });
       return;
     }
+    if (inst.disabled) {
+      this.log.debug("router.node_disabled", {
+        flow: this.flow.name,
+        nodeId: item.nodeId,
+      });
+      return;
+    }
 
     this.log.info("router.deliver", {
       flow: this.flow.name,

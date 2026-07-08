@@ -46,6 +46,7 @@ function reducer(state: State, action: Action): State {
         file: msg.file,
         wiring: msg.wiring,
         status: prev?.status ?? { kind: "starting" },
+        undo: msg.undo,
       });
       return { ...state, flows };
     }

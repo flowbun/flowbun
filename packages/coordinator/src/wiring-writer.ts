@@ -23,6 +23,17 @@ export class WiringWriteError extends Error {}
  * - node.add/wire.add (an object/array append) re-expand whichever sibling
  *   immediately precedes the insertion point, since jsonc-parser has to
  *   emit "prev-prop + comma + new-prop" as one edit.
+ * - wire.remove and node.remove's wire cascade replace the *whole* `wires`
+ *   array in one edit rather than removing individual elements by index.
+ *   This isn't a style choice: jsonc-parser@3.3.1's modify() has a real bug
+ *   where removing what is currently the last element of a single-line
+ *   array (exactly the shape `data/wiring/*.json` commits wires in)
+ *   corrupts the output with a stray extra `]` — reproduced directly
+ *   against the library outside this codebase. Removing anything but the
+ *   last element, or an array that's already multi-line, isn't affected,
+ *   which is exactly why this slipped past the original test suite. The
+ *   whole-array replace costs the same "sibling reformat" tradeoff
+ *   wire.add already has, and is always correct.
  * - The *first* node.position (or any field genuinely new to that node,
  *   e.g. a freshly-committed file that predates positions existing at all)
  *   expands that one node's own object to multi-line, since there's no
@@ -62,19 +73,24 @@ export function applyMutation(
       break;
     }
     case "node.remove": {
-      // Cascade: drop every wire touching this node first, in descending
-      // index order so earlier indices stay valid across the sequential edits.
-      const doomed = current.wires
-        .map((_, i) => i)
-        .filter((i) => {
-          const wire = current.wires[i] as [string, string];
-          return (
-            parsePortRef(wire[0]).nodeId === mutation.nodeId ||
-            parsePortRef(wire[1]).nodeId === mutation.nodeId
-          );
-        })
-        .sort((a, b) => b - a);
-      for (const idx of doomed) edit(["wires", idx], undefined);
+      // Cascade: drop every wire touching this node first. Removing wires
+      // one at a time by index (even in descending order) hits a real
+      // jsonc-parser@3.3.1 bug: modify() corrupts the output when the edit
+      // removes what is currently the *last* element of a single-line
+      // array (verified directly against the library — see the scratch
+      // repro that motivated this fix). Replacing the whole `wires` array
+      // in one edit sidesteps that bug entirely; it costs the same
+      // accepted "whole-array reformat" tradeoff `wire.add` already has.
+      const survivors = current.wires.filter((wire) => {
+        const [a, b] = wire as [string, string];
+        return (
+          parsePortRef(a).nodeId !== mutation.nodeId &&
+          parsePortRef(b).nodeId !== mutation.nodeId
+        );
+      });
+      if (survivors.length !== current.wires.length) {
+        edit(["wires"], survivors);
+      }
       edit(["nodes", mutation.nodeId], undefined);
       break;
     }
@@ -83,6 +99,16 @@ export function applyMutation(
       break;
     case "node.position":
       edit(["nodes", mutation.nodeId, "position"], mutation.position);
+      break;
+    case "node.disabled":
+      // Omit the field entirely when re-enabling (undefined = delete),
+      // rather than writing a literal "disabled": false — keeps a normal,
+      // enabled node's committed JSON exactly as clean as before this
+      // feature existed.
+      edit(
+        ["nodes", mutation.nodeId, "disabled"],
+        mutation.disabled ? true : undefined,
+      );
       break;
     case "wire.add":
       edit(["wires", current.wires.length], [mutation.from, mutation.to], true);
@@ -95,7 +121,13 @@ export function applyMutation(
       // both a node.remove (server-side cascade) and a wire.remove for the
       // same edge in one user gesture.
       if (idx === -1) break;
-      edit(["wires", idx], undefined);
+      // Whole-array replace, not a per-index removal — see the node.remove
+      // case above for why (the same jsonc-parser last-element-removal bug
+      // applies here whenever the deleted wire happens to be the last one).
+      edit(
+        ["wires"],
+        current.wires.filter((_, i) => i !== idx),
+      );
       break;
     }
   }

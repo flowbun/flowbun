@@ -11,6 +11,7 @@ import type { FlowEntry, ServerToClient, TypecheckOutcome } from "flowbun/ws";
 import { HaRelay } from "./ha-relay";
 import { LogBuffer } from "./log-buffer";
 import { Supervisor } from "./supervisor";
+import { UndoStack } from "./undo-stack";
 import { startWatcher } from "./watcher";
 import { buildPalette, startWsServer } from "./ws-server";
 
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
   const logBuffer = new LogBuffer();
   const haRelay = new HaRelay();
   const flows = new Map<string, FlowEntry>();
+  const undoStack = new UndoStack();
   let broadcast: ((msg: ServerToClient) => void) | null = null;
   const recentSelfWrites = new Map<string, number>(); // absolute wiring file path -> Date.now()
 
@@ -87,6 +89,7 @@ async function main(): Promise<void> {
       file: rel,
       wiring,
       status: supervisor.getStatus(flow.name) ?? { kind: "starting" },
+      undo: undoStack.status(rel),
     });
   }
 
@@ -130,8 +133,14 @@ async function main(): Promise<void> {
       file: rel,
       wiring,
       status: supervisor.getStatus(flow.name) ?? { kind: "starting" },
+      undo: undoStack.status(rel),
     });
-    broadcast?.({ type: "flow.updated", file: rel, wiring });
+    broadcast?.({
+      type: "flow.updated",
+      file: rel,
+      wiring,
+      undo: undoStack.status(rel),
+    });
     if (!recheck.ok) {
       supervisor.markFailedTypecheck(flow.name, recheck.output);
       console.error(
@@ -179,9 +188,11 @@ async function main(): Promise<void> {
 
   const wsServer = startWsServer(WS_PORT, {
     dataDir: DATA_DIR,
+    repoRoot: join(DATA_DIR, ".."),
     supervisor,
     logBuffer,
     flows,
+    undoStack,
     getPalette: () => buildPalette(DATA_DIR, registry),
     reloadWiringFile,
     reloadBlocksAndRestartAll,

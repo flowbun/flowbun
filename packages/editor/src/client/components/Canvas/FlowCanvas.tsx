@@ -14,22 +14,16 @@ import {
 } from "@xyflow/react";
 import type { Wiring } from "flowbun/wiring";
 import type { BlockPaletteEntry } from "flowbun/ws";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { freshNodeId } from "../../lib/freshNodeId";
+import { generateRequestId } from "../../lib/requestId";
 import { useFlowbunSocket } from "../../ws/FlowbunSocketContext";
 import { BlockNode } from "./BlockNode";
+import { DeletableEdge } from "./DeletableEdge";
 import { type BlockNodeData, useFlowGraph } from "./useFlowGraph";
 
 const nodeTypes = { block: BlockNode };
-
-let nextIdSuffix = 1;
-function freshNodeId(blockName: string, wiring: Wiring): string {
-  const base = blockName.replace(/[^a-zA-Z0-9_]/g, "_").replace(/^_+/, "");
-  let id = base;
-  while (id in wiring.nodes || id === "") {
-    id = `${base}_${nextIdSuffix++}`;
-  }
-  return id;
-}
+const edgeTypes = { deletable: DeletableEdge };
 
 function Inner({
   file,
@@ -37,14 +31,14 @@ function Inner({
   palette,
   onOpenBlockEditor,
   onSelectNode,
-  readOnly = false,
+  isMobile = false,
 }: {
   file: string;
   wiring: Wiring;
   palette: BlockPaletteEntry[];
   onOpenBlockEditor: (blockFile: string) => void;
   onSelectNode: (nodeId: string | null) => void;
-  readOnly?: boolean;
+  isMobile?: boolean;
 }) {
   const { send } = useFlowbunSocket();
   const { nodes: graphNodes, edges: graphEdges } = useFlowGraph(
@@ -54,14 +48,27 @@ function Inner({
   const [nodes, setNodes] = useState<Node<BlockNodeData>[]>(graphNodes);
   const [edges, setEdges] = useState<Edge[]>(graphEdges);
   const rf = useReactFlow();
+  const prevNodeCount = useRef(graphNodes.length);
 
   // The server (via flow.updated broadcasts) is the sole source of truth —
   // no optimistic local mutation of graph state on user actions; this
   // effect is what actually updates the canvas after every server ack.
+  // Edges are tagged "deletable" (a tap/click target for the X button — see
+  // DeletableEdge) since mobile has no Backspace key to trigger onEdgesDelete.
   useEffect(() => {
     setNodes(graphNodes);
-    setEdges(graphEdges);
-  }, [graphNodes, graphEdges]);
+    setEdges(
+      graphEdges.map((e) => ({ ...e, type: "deletable", data: { file } })),
+    );
+    // A node was added (desktop drag-drop or mobile tap-to-add) — its
+    // placeholder position may well be outside the current pan/zoom, with
+    // no way to find it otherwise. Re-fit only on a genuine count increase,
+    // not on every drag/config-edit broadcast.
+    if (graphNodes.length > prevNodeCount.current) {
+      rf.fitView({ duration: 300 });
+    }
+    prevNodeCount.current = graphNodes.length;
+  }, [graphNodes, graphEdges, file, rf]);
 
   const onNodesChange = useCallback(
     (changes: NodeChange<Node<BlockNodeData>>[]) => {
@@ -77,7 +84,7 @@ function Inner({
     (_event: unknown, node: Node<BlockNodeData>) => {
       send({
         type: "wiring.mutate",
-        requestId: crypto.randomUUID(),
+        requestId: generateRequestId(),
         file,
         mutation: {
           op: "node.position",
@@ -94,7 +101,7 @@ function Inner({
       if (!connection.sourceHandle || !connection.targetHandle) return;
       send({
         type: "wiring.mutate",
-        requestId: crypto.randomUUID(),
+        requestId: generateRequestId(),
         file,
         mutation: {
           op: "wire.add",
@@ -113,7 +120,7 @@ function Inner({
       for (const n of deleted) {
         send({
           type: "wiring.mutate",
-          requestId: crypto.randomUUID(),
+          requestId: generateRequestId(),
           file,
           mutation: { op: "node.remove", nodeId: n.id },
         });
@@ -128,7 +135,7 @@ function Inner({
         if (!e.sourceHandle || !e.targetHandle) continue;
         send({
           type: "wiring.mutate",
-          requestId: crypto.randomUUID(),
+          requestId: generateRequestId(),
           file,
           mutation: {
             op: "wire.remove",
@@ -153,7 +160,7 @@ function Inner({
       const nodeId = freshNodeId(blockName, wiring);
       send({
         type: "wiring.mutate",
-        requestId: crypto.randomUUID(),
+        requestId: generateRequestId(),
         file,
         mutation: { op: "node.add", nodeId, block: blockName, position },
       });
@@ -166,6 +173,9 @@ function Inner({
     event.dataTransfer.dropEffect = "move";
   }, []);
 
+  // Double-click-to-edit-source is a desktop-only shortcut: on touch, a
+  // double-tap on a node is ambiguous with double-tap-to-zoom, and mobile
+  // has an explicit "edit source" button in the config panel instead.
   const onNodeDoubleClick = useCallback(
     (_event: unknown, node: Node<BlockNodeData>) => {
       const blockFile = node.data.def?.file;
@@ -179,18 +189,16 @@ function Inner({
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
-      nodesDraggable={!readOnly}
-      nodesConnectable={!readOnly}
-      deleteKeyCode={readOnly ? null : undefined}
+      edgeTypes={edgeTypes}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
-      onNodeDragStop={readOnly ? undefined : onNodeDragStop}
-      onConnect={readOnly ? undefined : onConnect}
-      onNodesDelete={readOnly ? undefined : onNodesDelete}
-      onEdgesDelete={readOnly ? undefined : onEdgesDelete}
-      onDrop={readOnly ? undefined : onDrop}
-      onDragOver={readOnly ? undefined : onDragOver}
-      onNodeDoubleClick={readOnly ? undefined : onNodeDoubleClick}
+      onNodeDragStop={onNodeDragStop}
+      onConnect={onConnect}
+      onNodesDelete={onNodesDelete}
+      onEdgesDelete={onEdgesDelete}
+      onDrop={onDrop}
+      onDragOver={onDragOver}
+      onNodeDoubleClick={isMobile ? undefined : onNodeDoubleClick}
       onNodeClick={(_event, node) => onSelectNode(node.id)}
       onPaneClick={() => onSelectNode(null)}
       colorMode="dark"
@@ -208,7 +216,7 @@ export function FlowCanvas(props: {
   palette: BlockPaletteEntry[];
   onOpenBlockEditor: (blockFile: string) => void;
   onSelectNode: (nodeId: string | null) => void;
-  readOnly?: boolean;
+  isMobile?: boolean;
 }) {
   return (
     <ReactFlowProvider>

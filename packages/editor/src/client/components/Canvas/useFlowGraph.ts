@@ -12,6 +12,7 @@ export interface BlockNodeData extends Record<string, unknown> {
   block: string;
   config: unknown;
   def: BlockPaletteEntry | undefined;
+  disabled: boolean;
 }
 
 export function useFlowGraph(
@@ -33,6 +34,7 @@ export function useFlowGraph(
           block: n.block,
           config: n.config,
           def: byName.get(n.block),
+          disabled: n.disabled ?? false,
         },
       }),
     );

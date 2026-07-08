@@ -24,6 +24,12 @@ Bun.serve({
         `ws://${new URL(req.url).hostname}:${WS_PORT}/ws`;
       return Response.json({ coordinatorWsUrl });
     },
+    // SPA fallback: the client renders its own routes (/flow/:file,
+    // /flow/:file/node/:nodeId) via the History API, so a hard refresh or a
+    // pasted deep link at one of those paths must still get the same
+    // index.html — there's no server-side knowledge of "flows" here at all,
+    // it's purely client-side routing. More specific routes above still win.
+    "/*": index,
   },
 });
 

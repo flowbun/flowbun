@@ -21,6 +21,9 @@ export interface LoadedNode {
   blockModulePath: string;
   config: unknown;
   blockState: StateScope;
+  /** See router.ts's deliver() — a disabled node is loaded (state, config,
+   * everything) but never executed, and never subscribed for @hass/trigger. */
+  disabled: boolean;
 }
 
 export interface LoadedFlow {

@@ -26,6 +26,11 @@ export interface WiringPosition {
   y: number;
 }
 
+export interface UndoStatus {
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
 export interface FlowEntry {
   /** Filename under data/wiring/, e.g. "hallway_lights.json" — the handle
    * every wiring-scoped command uses. Not an absolute path: the client has
@@ -34,6 +39,10 @@ export interface FlowEntry {
   file: string;
   wiring: Wiring;
   status: FlowStatus;
+  /** Server-held, per-file history of user-initiated wiring.mutate calls
+   * only (never externally-detected file edits) — see coordinator's
+   * undo-stack.ts. */
+  undo: UndoStatus;
 }
 
 export interface BlockPaletteEntry {
@@ -60,6 +69,7 @@ export type WiringMutation =
   | { op: "node.remove"; nodeId: string }
   | { op: "node.config"; nodeId: string; config: unknown }
   | { op: "node.position"; nodeId: string; position: WiringPosition }
+  | { op: "node.disabled"; nodeId: string; disabled: boolean }
   | { op: "wire.add"; from: string; to: string } // "nodeId.port" refs, per parsePortRef
   | { op: "wire.remove"; from: string; to: string };
 
@@ -78,7 +88,9 @@ export type ClientToServer =
     }
   | { type: "block.write"; requestId: string; file: string; source: string }
   | { type: "block.read"; requestId: string; file: string }
-  | { type: "flow.restart"; requestId: string; flow: string };
+  | { type: "flow.restart"; requestId: string; flow: string }
+  | { type: "wiring.undo"; requestId: string; file: string }
+  | { type: "wiring.redo"; requestId: string; file: string };
 
 // ---------- coordinator -> browser ----------
 export type ServerToClient =
@@ -88,7 +100,7 @@ export type ServerToClient =
       palette: BlockPaletteEntry[];
       logs: LogRecord[];
     }
-  | { type: "flow.updated"; file: string; wiring: Wiring }
+  | { type: "flow.updated"; file: string; wiring: Wiring; undo: UndoStatus }
   | { type: "flow.status"; flow: string; status: FlowStatus }
   | { type: "palette.updated"; palette: BlockPaletteEntry[] }
   | { type: "log"; entry: LogRecord }
@@ -101,10 +113,29 @@ export type ServerToClient =
     }
   | { type: "wiring.mutateResult"; requestId: string; ok: false; error: string }
   | {
+      type: "wiring.undoResult";
+      requestId: string;
+      ok: true;
+      wiring: Wiring;
+      typecheck: TypecheckOutcome;
+    }
+  | { type: "wiring.undoResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "wiring.redoResult";
+      requestId: string;
+      ok: true;
+      wiring: Wiring;
+      typecheck: TypecheckOutcome;
+    }
+  | { type: "wiring.redoResult"; requestId: string; ok: false; error: string }
+  | {
       type: "block.writeResult";
       requestId: string;
       ok: true;
       typecheck: TypecheckOutcome;
+      /** The text actually written to disk — may differ from what the
+       * client sent if it was reformatted by Biome on save. */
+      source: string;
     }
   | { type: "block.writeResult"; requestId: string; ok: false; error: string }
   | { type: "block.readResult"; requestId: string; ok: true; source: string }

@@ -55,6 +55,16 @@ export class Supervisor {
   }
 
   private spawn(rt: FlowRuntime): void {
+    // Clears any listener left behind by a previous incarnation of this
+    // flow (crashed or deliberately restarted) before the new process
+    // re-subscribes. Every trigger node used to always re-subscribe on
+    // restart, so a stale listener was harmlessly overwritten by the same
+    // flowName::nodeId key — that stopped being guaranteed once a trigger
+    // node can be disabled (the new flow-host just won't re-subscribe it),
+    // which would otherwise leave a listener closed over a dead
+    // subprocess's `send` lingering in HaRelay forever. A no-op on first
+    // boot (nothing subscribed yet).
+    this.haRelay.unsubscribeFlow(rt.flowName);
     const mainPath = join(
       import.meta.dir,
       "..",
@@ -213,7 +223,7 @@ export class Supervisor {
       if (!exitedInTime) rt.subprocess.kill("SIGKILL");
     }
     this.setStatus(rt, { kind: "starting" });
-    this.spawn(rt);
+    this.spawn(rt); // also clears stale HA listeners from the old process — see spawn()'s own comment
   }
 
   markFailedTypecheck(flowName: string, output: string): void {

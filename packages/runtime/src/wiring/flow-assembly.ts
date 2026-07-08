@@ -49,6 +49,7 @@ export function assembleFlow(
         "block",
         blockScopeKey(wiring.name, nodeId),
       ),
+      disabled: nodeDef.disabled ?? false,
     });
   }
 

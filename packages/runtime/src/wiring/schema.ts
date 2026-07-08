@@ -19,6 +19,10 @@ const WiringNodeSchema = z.object({
   // meaningless at runtime. Optional so every existing committed wiring
   // file stays valid without being touched.
   position: PositionSchema.optional(),
+  // Unlike position, this DOES reach LoadedNode/assembleFlow — see
+  // router/router.ts's deliver(). Omitted (not `false`) means enabled, so
+  // every existing committed wiring file stays valid and clean.
+  disabled: z.boolean().optional(),
 });
 
 const PortRefSchema = z

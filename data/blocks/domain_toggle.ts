@@ -11,6 +11,7 @@ export default defineBlock({
       at: number;
     },
   },
+
   outputs: {
     command: {} as {
       domain: string;
@@ -19,6 +20,7 @@ export default defineBlock({
       data?: Record<string, unknown>;
     },
   },
+
   async process({ changed }, ctx) {
     if (changed.state !== "on" && changed.state !== "off") return; // ignore any other input_text value
     return {

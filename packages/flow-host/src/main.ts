@@ -86,7 +86,7 @@ async function main(): Promise<void> {
 
   let reqId = 1;
   for (const [nodeId, node] of flow.nodes) {
-    if (node.block.name === "@hass/trigger") {
+    if (node.block.name === "@hass/trigger" && !node.disabled) {
       const entity = (node.config as { entity: string }).entity;
       send({ type: "hass.subscribe", requestId: reqId++, nodeId, entity });
     }
