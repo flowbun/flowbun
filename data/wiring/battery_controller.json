@@ -1,0 +1,124 @@
+{
+  "name": "battery_controller",
+  "nodes": {
+    "power_trigger": {
+      "block": "@hass/trigger",
+      "config": {
+        "entity": "sensor.shellyemg3_d885ac0d3b44_energy_meter_0_power"
+      },
+      "position": {
+        "x": 120,
+        "y": 296
+      }
+    },
+    "grid_power_trigger": {
+      "block": "@hass/trigger",
+      "config": { "entity": "sensor.ef_60046_grid_power" },
+      "position": {
+        "x": 108.33502454587966,
+        "y": 95.83103811630619
+      }
+    },
+    "cache_grid_power": {
+      "block": "state_cache",
+      "config": { "key": "battery_controller:grid_power", "as": "number" },
+      "position": {
+        "x": 395.888198757764,
+        "y": 79.07453416149069
+      }
+    },
+    "charge_switch_trigger": {
+      "block": "@hass/trigger",
+      "config": { "entity": "switch.ef_60046_charging_task" },
+      "position": {
+        "x": 120,
+        "y": 460
+      }
+    },
+    "cache_charge_state": {
+      "block": "state_cache",
+      "config": { "key": "battery_controller:charge_on", "as": "boolean" },
+      "position": {
+        "x": 417.17391304347825,
+        "y": 460
+      }
+    },
+    "discharge_switch_trigger": {
+      "block": "@hass/trigger",
+      "config": { "entity": "switch.ef_60046_discharging_task" },
+      "position": {
+        "x": 120,
+        "y": 620
+      }
+    },
+    "cache_discharge_state": {
+      "block": "state_cache",
+      "config": { "key": "battery_controller:discharge_on", "as": "boolean" },
+      "position": {
+        "x": 416.24844720496895,
+        "y": 619.4215838509317
+      }
+    },
+    "battery_controller": {
+      "block": "battery_controller",
+      "position": {
+        "x": 421.2165349836164,
+        "y": 295.0204088519479
+      }
+    },
+    "charge_off": {
+      "block": "@hass/action",
+      "position": {
+        "x": 642.8454536203997,
+        "y": 17.709402909845117
+      }
+    },
+    "charge_on": {
+      "block": "@hass/action",
+      "position": {
+        "x": 711.882976965836,
+        "y": 92.97095704439708
+      }
+    },
+    "discharge_off": {
+      "block": "@hass/action",
+      "position": {
+        "x": 763.9558658024362,
+        "y": 177.458138548912
+      }
+    },
+    "discharge_on": {
+      "block": "@hass/action",
+      "position": {
+        "x": 782.7807086917943,
+        "y": 537.7166679526252
+      }
+    },
+    "set_discharge_limit": {
+      "block": "@hass/action",
+      "position": {
+        "x": 716.9706029859959,
+        "y": 603.421260753829
+      }
+    },
+    "set_charge_limit": {
+      "block": "@hass/action",
+      "position": {
+        "x": 659.5026233555803,
+        "y": 682.1024941167393
+      }
+    }
+  },
+  "wires": [
+    ["power_trigger.changed", "battery_controller.changed"],
+    ["grid_power_trigger.changed", "cache_grid_power.changed"],
+    ["charge_switch_trigger.changed", "cache_charge_state.changed"],
+    ["discharge_switch_trigger.changed", "cache_discharge_state.changed"],
+    ["battery_controller.chargeOn", "charge_on.call"],
+    ["battery_controller.chargeOff", "charge_off.call"],
+    ["battery_controller.dischargeOn", "discharge_on.call"],
+    ["battery_controller.dischargeOff", "discharge_off.call"],
+    ["battery_controller.setChargeLimit", "set_charge_limit.call"],
+    ["battery_controller.setDischargeLimit", "set_discharge_limit.call"]
+  ]
+}

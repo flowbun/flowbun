@@ -24,10 +24,11 @@ export default defineBlock<
   inputs: {},
   outputs: { changed: {} as TriggerOutputs["changed"] },
   async process() {
-    // Trigger nodes are never invoked through normal mailbox delivery —
-    // registerHassTrigger below calls router.ingress() directly instead.
-    // This exists only so the type machinery (InputsOf/OutputsOf, the
-    // typecheck generator) treats @hass/trigger uniformly with other blocks.
+    // Trigger nodes are never invoked through normal mailbox delivery — the
+    // flow-host calls router.emitFromSource() directly instead (see its own
+    // doc comment in router.ts for why not ingress()). This exists only so
+    // the type machinery (InputsOf/OutputsOf, the typecheck generator)
+    // treats @hass/trigger uniformly with other blocks.
     return undefined;
   },
 });

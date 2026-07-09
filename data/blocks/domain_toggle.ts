@@ -23,6 +23,7 @@ export default defineBlock({
 
   async process({ changed }, ctx) {
     if (changed.state !== "on" && changed.state !== "off") return; // ignore any other input_text value
+
     return {
       command: {
         domain: ctx.config.domain,

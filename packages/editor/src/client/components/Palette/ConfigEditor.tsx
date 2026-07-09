@@ -1,5 +1,10 @@
-import type { BlockPaletteEntry } from "flowbun/ws";
-import { useState } from "react";
+import type { BlockPaletteEntry, HassEntitySummary } from "flowbun/ws";
+import { useEffect, useState } from "react";
+import { generateRequestId } from "../../lib/requestId";
+import { useFlowbunSocket } from "../../ws/FlowbunSocketContext";
+
+/** Fields named "entity" on these blocks get a datalist of live HA entity IDs. */
+const HASS_ENTITY_FIELD_BLOCKS = new Set(["@hass/trigger"]);
 
 /**
  * One form control per key of the block's defaultConfig, picked by
@@ -35,10 +40,28 @@ export function ConfigEditor({
   const base = (config ?? defaultConfig ?? {}) as Record<string, unknown>;
   const template = (defaultConfig ?? {}) as Record<string, unknown>;
   const [values, setValues] = useState<Record<string, unknown>>(base);
+  const [hassEntities, setHassEntities] = useState<HassEntitySummary[]>([]);
+  const { send } = useFlowbunSocket();
 
   function setField(key: string, value: unknown) {
     setValues((v) => ({ ...v, [key]: value }));
   }
+
+  const wantsHassEntities = HASS_ENTITY_FIELD_BLOCKS.has(block);
+  useEffect(() => {
+    if (!wantsHassEntities) return;
+    let cancelled = false;
+    send({ type: "hass.entities", requestId: generateRequestId() }).then(
+      (r) => {
+        if (cancelled) return;
+        if (r.type === "hass.entitiesResult" && r.ok)
+          setHassEntities(r.entities);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [wantsHassEntities, send]);
 
   const keys =
     Object.keys(template).length > 0
@@ -117,12 +140,31 @@ export function ConfigEditor({
                   onChange={(e) => setField(key, Number(e.target.value))}
                 />
               ) : kind === "string" ? (
-                <input
-                  id={fieldId}
-                  type="text"
-                  value={typeof current === "string" ? current : ""}
-                  onChange={(e) => setField(key, e.target.value)}
-                />
+                <>
+                  <input
+                    id={fieldId}
+                    type="text"
+                    value={typeof current === "string" ? current : ""}
+                    onChange={(e) => setField(key, e.target.value)}
+                    list={
+                      wantsHassEntities && key === "entity"
+                        ? `${fieldId}-entities`
+                        : undefined
+                    }
+                    autoComplete="off"
+                  />
+                  {wantsHassEntities && key === "entity" && (
+                    <datalist id={`${fieldId}-entities`}>
+                      {hassEntities.map((e) => (
+                        <option key={e.id} value={e.id}>
+                          {e.friendlyName
+                            ? `${e.id} — ${e.friendlyName}`
+                            : e.id}
+                        </option>
+                      ))}
+                    </datalist>
+                  )}
+                </>
               ) : (
                 <textarea
                   id={fieldId}

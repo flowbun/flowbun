@@ -1,6 +1,7 @@
 import type { ActionCall } from "flowbun/hass/action";
 import { performHassAction } from "flowbun/hass/action";
-import { isDryRun } from "flowbun/hass/client";
+import type { HassEntitySummary } from "flowbun/hass/client";
+import { isDryRun, listHassEntities } from "flowbun/hass/client";
 import type { TriggerOutputs } from "flowbun/hass/trigger";
 import { registerHassTrigger } from "flowbun/hass/trigger";
 
@@ -68,5 +69,10 @@ export class HaRelay {
     const dryRun = dryRunOverride ?? isDryRun();
     await performHassAction(call, dryRun); // performHassAction itself lazily calls getHass() when !dryRun
     return { dryRun };
+  }
+
+  /** Powers the editor's entity autocomplete (see ConfigEditor.tsx). */
+  listEntities(): Promise<HassEntitySummary[]> {
+    return listHassEntities();
   }
 }

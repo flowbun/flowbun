@@ -1,4 +1,6 @@
 import { Handle, type NodeProps, Position } from "@xyflow/react";
+import { formatClockTime } from "../../lib/formatTime";
+import { useLastProcessed } from "./LastProcessedContext";
 import type { BlockNodeData } from "./useFlowGraph";
 
 const isHassBlock = (block: string) => block.startsWith("@hass/");
@@ -6,6 +8,7 @@ const isHassBlock = (block: string) => block.startsWith("@hass/");
 export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
   const inputs = data.def ? Object.keys(data.def.inputs) : [];
   const outputs = data.def ? Object.keys(data.def.outputs) : [];
+  const lastProcessedAt = useLastProcessed(data.nodeId);
 
   return (
     <div
@@ -58,27 +61,42 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
       >
         {data.block}
       </div>
+      {lastProcessedAt !== undefined && (
+        <div
+          title={`last processed at ${formatClockTime(lastProcessedAt)}`}
+          style={{
+            padding: "0 10px 6px",
+            fontSize: 9,
+            color: "var(--text-dim)",
+          }}
+        >
+          ⏱ {formatClockTime(lastProcessedAt)}
+        </div>
+      )}
 
-      {inputs.map((port, i) => (
+      {/* One shared connection point per side, not one per port — every
+          wire into/out of this node starts from the same spot regardless of
+          which port it's actually assigned to. Which port a given wire
+          means is disambiguated by its own curved label (see DeletableEdge),
+          not by which handle it's plugged into. */}
+      {inputs.length > 0 && (
         <Handle
-          key={`in-${port}`}
           type="target"
           position={Position.Left}
-          id={port}
-          style={{ top: 32 + i * 16, background: "var(--text-dim)" }}
-          title={port}
+          id={undefined}
+          style={{ background: "var(--text-dim)" }}
+          title={inputs.join(", ")}
         />
-      ))}
-      {outputs.map((port, i) => (
+      )}
+      {outputs.length > 0 && (
         <Handle
-          key={`out-${port}`}
           type="source"
           position={Position.Right}
-          id={port}
-          style={{ top: 32 + i * 16, background: "var(--accent)" }}
-          title={port}
+          id={undefined}
+          style={{ background: "var(--accent)" }}
+          title={outputs.join(", ")}
         />
-      ))}
+      )}
     </div>
   );
 }

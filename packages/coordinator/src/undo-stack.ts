@@ -60,4 +60,9 @@ export class UndoStack {
       canRedo: (h?.redo.length ?? 0) > 0,
     };
   }
+
+  /** Drops a file's history entirely — call when its wiring file is deleted. */
+  forget(file: string): void {
+    this.files.delete(file);
+  }
 }

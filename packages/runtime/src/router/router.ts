@@ -47,6 +47,16 @@ export class Router {
    * (@hass/trigger's process() is a documented no-op) and only surfaced as a
    * hard failure once Phase 2's DistributedExecutor required every ordinary
    * node to have a live Worker.
+   *
+   * Logs its own "router.produced" first, matching deliver()'s shape
+   * exactly (same node/outputs/seq/traceId fields) — without this, a
+   * trigger's firing was invisible to anything watching for "router.produced"
+   * (the editor's wire-activity-dot animation among them: every wire *out*
+   * of a trigger never lit up, only the ones further downstream, since
+   * deliver() is never reached for the trigger node itself). Also threads
+   * this event's own seq through as the downstream deliveries' causationSeq
+   * (previously always null for trigger-originated chains), so a trigger
+   * firing is now traceable the same way any other node's output is.
    */
   emitFromSource(
     nodeId: string,
@@ -55,7 +65,15 @@ export class Router {
     traceId?: string,
   ): string {
     const tid = traceId ?? crypto.randomUUID();
-    this.fanOut(nodeId, port, payload, tid, null);
+    const seq = ++this.seq;
+    this.log.info("router.produced", {
+      flow: this.flow.name,
+      node: nodeId,
+      outputs: { [port]: payload },
+      seq,
+      traceId: tid,
+    });
+    this.fanOut(nodeId, port, payload, tid, seq);
     return tid;
   }
 

@@ -58,6 +58,75 @@ export interface BlockPaletteEntry {
   defaultConfig: unknown;
 }
 
+export interface HassEntitySummary {
+  id: string;
+  friendlyName?: string;
+}
+
+/** Snapshot of coordinator/system telemetry — gathered fresh on each
+ * "system.stats" request (see coordinator/src/main.ts's collectSystemStats),
+ * not pushed/streamed, since this is a "check in on it" view (the About
+ * modal), not a live dashboard. */
+export interface SystemStats {
+  coordinator: {
+    pid: number;
+    uptimeSec: number;
+    memory: {
+      /** Resident set size — total memory actually held by the process. */
+      rss: number;
+      heapUsed: number;
+      heapTotal: number;
+    };
+    bunVersion: string;
+  };
+  /** Count of OS-level processes whose executable is literally "bun" —
+   * the coordinator itself plus one per running flow-host (each flow-host
+   * is its own `bun run` subprocess; see supervisor.ts). Best-effort: 0 if
+   * /proc isn't available (non-Linux), rather than failing the whole
+   * request over one optional number. */
+  bunProcessCount: number;
+  flows: {
+    total: number;
+    /** FlowStatus["kind"] -> count, e.g. {running: 3, "failed-typecheck": 1}. */
+    byStatus: Record<string, number>;
+  };
+  system: {
+    totalMemBytes: number;
+    freeMemBytes: number;
+    /** 1/5/15-minute load averages — always [0,0,0] on platforms without
+     * the concept (Windows), per Node's own os.loadavg() behavior. */
+    loadAvg: [number, number, number];
+    cpuCount: number;
+    uptimeSec: number;
+  };
+  websocket: {
+    connectedClients: number;
+  };
+  logBuffer: {
+    size: number;
+  };
+  palette: {
+    blockCount: number;
+  };
+}
+
+/** Result of running one arbitrary SQL statement typed into the log
+ * panel's "DB" tab (see coordinator/src/db-repl.ts). `columns`/`rows` are
+ * empty for a statement that doesn't produce a result set (CREATE/INSERT/
+ * UPDATE/DELETE without RETURNING) — `changes`/`lastInsertRowid` are only
+ * meaningful in that case. `rows` are arrays aligned to `columns`, not
+ * objects, since column order (not just names) matters for rendering a
+ * table. lastInsertRowid is a string — sqlite rowids can exceed
+ * Number.MAX_SAFE_INTEGER, and stringifying up front avoids a bigint ever
+ * reaching JSON.stringify (which throws on bigint). */
+export interface DbQueryOutcome {
+  columns: string[];
+  rows: unknown[][];
+  rowCount: number;
+  changes?: number;
+  lastInsertRowid?: string;
+}
+
 export type WiringMutation =
   | {
       op: "node.add";
@@ -71,7 +140,18 @@ export type WiringMutation =
   | { op: "node.position"; nodeId: string; position: WiringPosition }
   | { op: "node.disabled"; nodeId: string; disabled: boolean }
   | { op: "wire.add"; from: string; to: string } // "nodeId.port" refs, per parsePortRef
-  | { op: "wire.remove"; from: string; to: string };
+  | { op: "wire.remove"; from: string; to: string }
+  // Retargets one end (or both) of an existing wire to a different port on
+  // the same node — e.g. reassigning which output a wire actually reads
+  // from, via the canvas's wire-label picker. newFrom/newTo must repeat the
+  // unchanged side verbatim when only one end is being reassigned.
+  | {
+      op: "wire.rewire";
+      from: string;
+      to: string;
+      newFrom: string;
+      newTo: string;
+    };
 
 export interface TypecheckOutcome {
   ok: boolean;
@@ -88,9 +168,16 @@ export type ClientToServer =
     }
   | { type: "block.write"; requestId: string; file: string; source: string }
   | { type: "block.read"; requestId: string; file: string }
+  | { type: "block.delete"; requestId: string; file: string }
+  | { type: "flow.delete"; requestId: string; file: string }
   | { type: "flow.restart"; requestId: string; flow: string }
   | { type: "wiring.undo"; requestId: string; file: string }
-  | { type: "wiring.redo"; requestId: string; file: string };
+  | { type: "wiring.redo"; requestId: string; file: string }
+  | { type: "flow.create"; requestId: string; name: string }
+  | { type: "block.create"; requestId: string; name: string }
+  | { type: "hass.entities"; requestId: string }
+  | { type: "system.stats"; requestId: string }
+  | { type: "db.query"; requestId: string; sql: string };
 
 // ---------- coordinator -> browser ----------
 export type ServerToClient =
@@ -102,6 +189,9 @@ export type ServerToClient =
     }
   | { type: "flow.updated"; file: string; wiring: Wiring; undo: UndoStatus }
   | { type: "flow.status"; flow: string; status: FlowStatus }
+  /** Its wiring file was deleted from disk (detected by the fs-watcher) —
+   * the flow-host has already been stopped; the client should drop the tab. */
+  | { type: "flow.removed"; file: string }
   | { type: "palette.updated"; palette: BlockPaletteEntry[] }
   | { type: "log"; entry: LogRecord }
   | {
@@ -140,5 +230,50 @@ export type ServerToClient =
   | { type: "block.writeResult"; requestId: string; ok: false; error: string }
   | { type: "block.readResult"; requestId: string; ok: true; source: string }
   | { type: "block.readResult"; requestId: string; ok: false; error: string }
+  | { type: "block.deleteResult"; requestId: string; ok: true }
+  | { type: "block.deleteResult"; requestId: string; ok: false; error: string }
+  | { type: "flow.deleteResult"; requestId: string; ok: true }
+  | { type: "flow.deleteResult"; requestId: string; ok: false; error: string }
   | { type: "flow.restartResult"; requestId: string; ok: true }
-  | { type: "flow.restartResult"; requestId: string; ok: false; error: string };
+  | { type: "flow.restartResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "flow.createResult";
+      requestId: string;
+      ok: true;
+      /** Filename actually used — the server slugifies/validates the
+       * requested name, so the client navigates to this rather than
+       * guessing. */
+      file: string;
+      wiring: Wiring;
+    }
+  | { type: "flow.createResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "block.createResult";
+      requestId: string;
+      ok: true;
+      /** Filename actually used (server slugifies/validates the name). */
+      file: string;
+      source: string;
+    }
+  | { type: "block.createResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "hass.entitiesResult";
+      requestId: string;
+      ok: true;
+      entities: HassEntitySummary[];
+    }
+  | {
+      type: "hass.entitiesResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
+  | {
+      type: "system.statsResult";
+      requestId: string;
+      ok: true;
+      stats: SystemStats;
+    }
+  | { type: "system.statsResult"; requestId: string; ok: false; error: string }
+  | ({ type: "db.queryResult"; requestId: string; ok: true } & DbQueryOutcome)
+  | { type: "db.queryResult"; requestId: string; ok: false; error: string };

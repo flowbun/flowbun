@@ -1,17 +1,20 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { ServerWebSocket } from "bun";
-import type { BlockRegistry } from "flowbun";
+import type { BlockRegistry, Wiring } from "flowbun";
 import type {
   BlockPaletteEntry,
   ClientToServer,
+  DbQueryOutcome,
   FlowEntry,
+  HassEntitySummary,
   ServerToClient,
   TypecheckOutcome,
 } from "flowbun/ws";
 import { formatWithBiome } from "./format-block";
 import type { LogBuffer } from "./log-buffer";
 import type { Supervisor } from "./supervisor";
+import type { CoordinatorStats } from "./system-stats";
 import type { UndoStack } from "./undo-stack";
 import { applyMutation, WiringWriteError } from "./wiring-writer";
 
@@ -30,6 +33,23 @@ export interface WsServerDeps {
   getPalette: () => BlockPaletteEntry[];
   reloadWiringFile: (path: string) => Promise<TypecheckOutcome>;
   reloadBlocksAndRestartAll: () => Promise<TypecheckOutcome>;
+  createFlow: (name: string) => Promise<{ file: string; wiring: Wiring }>;
+  createBlock: (name: string) => Promise<{ file: string; source: string }>;
+  deleteBlock: (file: string) => Promise<void>;
+  deleteFlow: (file: string) => Promise<void>;
+  listHassEntities: () => Promise<HassEntitySummary[]>;
+  /** Records an absolute path just written via the ws API so the
+   * fs-watcher's own independent trigger for that same write can be
+   * suppressed instead of running a redundant second reload. */
+  markSelfWrite: (path: string) => void;
+  /** Everything except `websocket.connectedClients` — this module fills
+   * that one field in itself, from the live `sockets` set below. */
+  getSystemStats: () => Promise<CoordinatorStats>;
+  /** Runs one arbitrary SQL statement against the coordinator's
+   * long-lived REPL connection (see main.ts) — synchronous under the
+   * hood (bun:sqlite), wrapped as async purely so a thrown syntax error
+   * becomes a rejected promise, matching every other deps call here. */
+  queryDb: (sql: string) => Promise<DbQueryOutcome>;
 }
 
 export function buildPalette(
@@ -172,6 +192,7 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 deps.repoRoot,
               );
               writeFileSync(path, formatted);
+              deps.markSelfWrite(path);
               const typecheck = await deps.reloadBlocksAndRestartAll();
               reply({
                 type: "block.writeResult",
@@ -214,6 +235,44 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             }
             break;
           }
+          case "block.delete": {
+            try {
+              if (!isSafeBlockFilename(msg.file))
+                throw new Error(`invalid block filename "${msg.file}"`);
+              await deps.deleteBlock(msg.file);
+              reply({
+                type: "block.deleteResult",
+                requestId: msg.requestId,
+                ok: true,
+              });
+            } catch (err) {
+              reply({
+                type: "block.deleteResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "flow.delete": {
+            try {
+              await deps.deleteFlow(msg.file);
+              reply({
+                type: "flow.deleteResult",
+                requestId: msg.requestId,
+                ok: true,
+              });
+            } catch (err) {
+              reply({
+                type: "flow.deleteResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
           case "flow.restart": {
             try {
               await deps.supervisor.restartFlow(msg.flow);
@@ -225,6 +284,106 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             } catch (err) {
               reply({
                 type: "flow.restartResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "flow.create": {
+            try {
+              const { file, wiring } = await deps.createFlow(msg.name);
+              reply({
+                type: "flow.createResult",
+                requestId: msg.requestId,
+                ok: true,
+                file,
+                wiring,
+              });
+            } catch (err) {
+              reply({
+                type: "flow.createResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "block.create": {
+            try {
+              const { file, source } = await deps.createBlock(msg.name);
+              reply({
+                type: "block.createResult",
+                requestId: msg.requestId,
+                ok: true,
+                file,
+                source,
+              });
+            } catch (err) {
+              reply({
+                type: "block.createResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "hass.entities": {
+            try {
+              const entities = await deps.listHassEntities();
+              reply({
+                type: "hass.entitiesResult",
+                requestId: msg.requestId,
+                ok: true,
+                entities,
+              });
+            } catch (err) {
+              reply({
+                type: "hass.entitiesResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "system.stats": {
+            try {
+              const stats = await deps.getSystemStats();
+              reply({
+                type: "system.statsResult",
+                requestId: msg.requestId,
+                ok: true,
+                stats: {
+                  ...stats,
+                  websocket: { connectedClients: sockets.size },
+                },
+              });
+            } catch (err) {
+              reply({
+                type: "system.statsResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "db.query": {
+            try {
+              const outcome = await deps.queryDb(msg.sql);
+              reply({
+                type: "db.queryResult",
+                requestId: msg.requestId,
+                ok: true,
+                ...outcome,
+              });
+            } catch (err) {
+              reply({
+                type: "db.queryResult",
                 requestId: msg.requestId,
                 ok: false,
                 error: String(err),

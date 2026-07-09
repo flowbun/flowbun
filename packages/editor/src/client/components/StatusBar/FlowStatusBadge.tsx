@@ -1,6 +1,8 @@
 import type { FlowStatus } from "flowbun/ws";
 
-function label(status: FlowStatus): string {
+/** Also used by StatusDot for its hover tooltip — the one place a
+ * compact, dot-only indicator still surfaces what the status actually is. */
+export function label(status: FlowStatus): string {
   switch (status.kind) {
     case "starting":
       return "starting";

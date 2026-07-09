@@ -14,13 +14,22 @@ import {
 } from "@xyflow/react";
 import type { Wiring } from "flowbun/wiring";
 import type { BlockPaletteEntry } from "flowbun/ws";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { freshNodeId } from "../../lib/freshNodeId";
+import { pickDefaultPort, usedPortsForNode } from "../../lib/pickWirePort";
 import { generateRequestId } from "../../lib/requestId";
-import { useFlowbunSocket } from "../../ws/FlowbunSocketContext";
+import {
+  lastProcessedKey,
+  useFlowbunSocket,
+} from "../../ws/FlowbunSocketContext";
 import { BlockNode } from "./BlockNode";
 import { DeletableEdge } from "./DeletableEdge";
-import { type BlockNodeData, useFlowGraph } from "./useFlowGraph";
+import { LastProcessedProvider } from "./LastProcessedContext";
+import {
+  type BlockNodeData,
+  useFlowGraph,
+  type WireEdgeData,
+} from "./useFlowGraph";
 
 const nodeTypes = { block: BlockNode };
 const edgeTypes = { deletable: DeletableEdge };
@@ -40,13 +49,26 @@ function Inner({
   onSelectNode: (nodeId: string | null) => void;
   isMobile?: boolean;
 }) {
-  const { send } = useFlowbunSocket();
+  const {
+    send,
+    state: { lastProcessed },
+  } = useFlowbunSocket();
   const { nodes: graphNodes, edges: graphEdges } = useFlowGraph(
     wiring,
     palette,
   );
+  // Rescoped to plain nodeId keys — the active canvas only ever shows one
+  // flow's nodes, and BlockNode shouldn't need to know the flow name.
+  const flowLastProcessed = useMemo(() => {
+    const prefix = `${lastProcessedKey(wiring.name, "")}`;
+    const scoped = new Map<string, number>();
+    for (const [key, at] of lastProcessed) {
+      if (key.startsWith(prefix)) scoped.set(key.slice(prefix.length), at);
+    }
+    return scoped;
+  }, [lastProcessed, wiring.name]);
   const [nodes, setNodes] = useState<Node<BlockNodeData>[]>(graphNodes);
-  const [edges, setEdges] = useState<Edge[]>(graphEdges);
+  const [edges, setEdges] = useState<Edge<WireEdgeData>[]>(graphEdges);
   const rf = useReactFlow();
   const prevNodeCount = useRef(graphNodes.length);
 
@@ -58,7 +80,14 @@ function Inner({
   useEffect(() => {
     setNodes(graphNodes);
     setEdges(
-      graphEdges.map((e) => ({ ...e, type: "deletable", data: { file } })),
+      // useFlowGraph always populates sourcePort/targetPort on every edge —
+      // only `file` needs stitching in here, since useFlowGraph has no
+      // notion of "which wiring file" (see WireEdgeData's own comment).
+      graphEdges.map((e) => ({
+        ...e,
+        type: "deletable",
+        data: { ...(e.data as WireEdgeData), file },
+      })),
     );
     // A node was added (desktop drag-drop or mobile tap-to-add) — its
     // placeholder position may well be outside the current pan/zoom, with
@@ -76,9 +105,12 @@ function Inner({
     },
     [],
   );
-  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
-    setEdges((eds) => applyEdgeChanges(changes, eds));
-  }, []);
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange<Edge<WireEdgeData>>[]) => {
+      setEdges((eds) => applyEdgeChanges(changes, eds));
+    },
+    [],
+  );
 
   const onNodeDragStop = useCallback(
     (_event: unknown, node: Node<BlockNodeData>) => {
@@ -96,21 +128,43 @@ function Inner({
     [send, file],
   );
 
+  // Every node exposes exactly one connection point per side now (see
+  // BlockNode), so a drawn wire can't tell us which port it meant — guess
+  // the first port on each end that isn't already used by another wire
+  // (falling back to each block's first port if all are taken). Wrong
+  // guesses are corrected via the wire's own curved label, not by rejecting
+  // the connection outright.
   const onConnect = useCallback(
     (connection: Connection) => {
-      if (!connection.sourceHandle || !connection.targetHandle) return;
+      const sourceNode = nodes.find((n) => n.id === connection.source);
+      const targetNode = nodes.find((n) => n.id === connection.target);
+      const outputs = sourceNode?.data.def
+        ? Object.keys(sourceNode.data.def.outputs)
+        : [];
+      const inputs = targetNode?.data.def
+        ? Object.keys(targetNode.data.def.inputs)
+        : [];
+      const sourcePort = pickDefaultPort(
+        outputs,
+        usedPortsForNode(wiring, connection.source, "source"),
+      );
+      const targetPort = pickDefaultPort(
+        inputs,
+        usedPortsForNode(wiring, connection.target, "target"),
+      );
+      if (!sourcePort || !targetPort) return;
       send({
         type: "wiring.mutate",
         requestId: generateRequestId(),
         file,
         mutation: {
           op: "wire.add",
-          from: `${connection.source}.${connection.sourceHandle}`,
-          to: `${connection.target}.${connection.targetHandle}`,
+          from: `${connection.source}.${sourcePort}`,
+          to: `${connection.target}.${targetPort}`,
         },
       });
     },
-    [send, file],
+    [send, file, nodes, wiring],
   );
 
   const onNodesDelete = useCallback(
@@ -130,17 +184,17 @@ function Inner({
   );
 
   const onEdgesDelete = useCallback(
-    (deleted: Edge[]) => {
+    (deleted: Edge<WireEdgeData>[]) => {
       for (const e of deleted) {
-        if (!e.sourceHandle || !e.targetHandle) continue;
+        if (!e.data?.sourcePort || !e.data?.targetPort) continue;
         send({
           type: "wiring.mutate",
           requestId: generateRequestId(),
           file,
           mutation: {
             op: "wire.remove",
-            from: `${e.source}.${e.sourceHandle}`,
-            to: `${e.target}.${e.targetHandle}`,
+            from: `${e.source}.${e.data.sourcePort}`,
+            to: `${e.target}.${e.data.targetPort}`,
           },
         });
       }
@@ -185,28 +239,38 @@ function Inner({
   );
 
   return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      nodeTypes={nodeTypes}
-      edgeTypes={edgeTypes}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onNodeDragStop={onNodeDragStop}
-      onConnect={onConnect}
-      onNodesDelete={onNodesDelete}
-      onEdgesDelete={onEdgesDelete}
-      onDrop={onDrop}
-      onDragOver={onDragOver}
-      onNodeDoubleClick={isMobile ? undefined : onNodeDoubleClick}
-      onNodeClick={(_event, node) => onSelectNode(node.id)}
-      onPaneClick={() => onSelectNode(null)}
-      colorMode="dark"
-      fitView
-    >
-      <Background />
-      <Controls />
-    </ReactFlow>
+    <LastProcessedProvider value={flowLastProcessed}>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onNodeDragStop={onNodeDragStop}
+        onConnect={onConnect}
+        onNodesDelete={onNodesDelete}
+        onEdgesDelete={onEdgesDelete}
+        onDrop={onDrop}
+        onDragOver={onDragOver}
+        onNodeDoubleClick={isMobile ? undefined : onNodeDoubleClick}
+        onNodeClick={(_event, node) => onSelectNode(node.id)}
+        onPaneClick={() => onSelectNode(null)}
+        colorMode="dark"
+        fitView
+        // Default is "Space" — a window-level keydown listener that's live
+        // whenever this canvas is mounted, including underneath overlays
+        // like MonacoBlockEditor. If focus isn't exactly on an input when
+        // Space is pressed, ReactFlow swallows it as pan-activation instead
+        // of letting it reach the overlay. Nothing here relies on
+        // hold-space-to-pan (drag panning works without it), so disabling
+        // it removes the whole class of bug rather than just this instance.
+        panActivationKeyCode={null}
+      >
+        <Background />
+        <Controls />
+      </ReactFlow>
+    </LastProcessedProvider>
   );
 }
 

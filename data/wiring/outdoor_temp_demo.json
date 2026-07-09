@@ -1,7 +1,0 @@
-{
-  "name": "outdoor_temp_demo",
-  "nodes": {
-    "temp": { "block": "outdoor_temp", "config": {} }
-  },
-  "wires": []
-}

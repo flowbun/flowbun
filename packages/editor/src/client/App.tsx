@@ -1,11 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MonacoBlockEditor } from "./components/BlockEditor/MonacoBlockEditor";
 import { FlowCanvas } from "./components/Canvas/FlowCanvas";
 import { LogPanel } from "./components/LogPanel/LogPanel";
+import { NewBlockDialog } from "./components/NewBlock/NewBlockDialog";
+import { NewFlowDialog } from "./components/NewFlow/NewFlowDialog";
 import { ConfigEditor } from "./components/Palette/ConfigEditor";
 import { PaletteSidebar } from "./components/Palette/PaletteSidebar";
-import { FlowStatusBadge } from "./components/StatusBar/FlowStatusBadge";
+import { FlowDetailModal } from "./components/StatusBar/FlowDetailModal";
+import { StatusDot } from "./components/StatusBar/StatusDot";
+import { ConfirmDialog } from "./components/shared/ConfirmDialog";
+import { ResizeHandle } from "./components/shared/ResizeHandle";
+import { SystemStatsModal } from "./components/shared/SystemStatsModal";
 import { useIsMobile } from "./hooks/useIsMobile";
+import { useResizablePane } from "./hooks/useResizablePane";
 import { freshNodeId } from "./lib/freshNodeId";
 import { generateRequestId } from "./lib/requestId";
 import { navigate, useRoute } from "./lib/route";
@@ -14,13 +21,34 @@ import {
   useFlowbunSocket,
 } from "./ws/FlowbunSocketContext";
 
+const MIN_HEADER_HEIGHT = 40;
+const MAX_HEADER_HEIGHT = 160;
+
 function Shell() {
   const { state, send } = useFlowbunSocket();
   const isMobile = useIsMobile();
+  const headerRef = useRef<HTMLDivElement>(null);
+  const headerPane = useResizablePane("flowbun.headerHeight", headerRef, {
+    axis: "y",
+    min: MIN_HEADER_HEIGHT,
+    max: MAX_HEADER_HEIGHT,
+  });
   const route = useRoute();
   const files = [...state.flows.keys()];
   const [blockEditorFile, setBlockEditorFile] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [newFlowOpen, setNewFlowOpen] = useState(false);
+  const [newBlockOpen, setNewBlockOpen] = useState(false);
+  const [deleteBlockTarget, setDeleteBlockTarget] = useState<{
+    file: string;
+    name: string;
+  } | null>(null);
+  const [deleteFlowTarget, setDeleteFlowTarget] = useState<{
+    file: string;
+    name: string;
+  } | null>(null);
+  const [flowDetailFile, setFlowDetailFile] = useState<string | null>(null);
+  const [statsOpen, setStatsOpen] = useState(false);
 
   const activeFile = route.file ?? files[0] ?? null;
   const selectedNodeId = route.file ? route.nodeId : null;
@@ -29,6 +57,9 @@ function Shell() {
     selectedNodeId && entry ? entry.wiring.nodes[selectedNodeId] : undefined;
   const selectedDef = selectedNode
     ? state.palette.find((p) => p.name === selectedNode.block)
+    : undefined;
+  const flowDetailEntry = flowDetailFile
+    ? state.flows.get(flowDetailFile)
     : undefined;
 
   // No flow in the URL yet (fresh "/" load), or the URL names a flow file
@@ -86,8 +117,28 @@ function Shell() {
 
   return (
     <>
-      <div className="app-header">
-        <span className="app-title">Flowbun</span>
+      <div
+        ref={headerRef}
+        className="app-header"
+        style={
+          headerPane.size !== undefined
+            ? { height: headerPane.size }
+            : undefined
+        }
+      >
+        <ResizeHandle
+          orientation="horizontal"
+          pane={headerPane}
+          label="Resize header"
+        />
+        <button
+          type="button"
+          className="app-title"
+          onClick={() => setStatsOpen(true)}
+          title="System stats"
+        >
+          Flowbun
+        </button>
         <span
           className={`connection-dot ${state.connected ? "connected" : ""}`}
           title={state.connected ? "connected" : "disconnected"}
@@ -126,26 +177,54 @@ function Shell() {
             const f = state.flows.get(file);
             if (!f) return null;
             return (
-              <button
+              <div
                 key={file}
-                type="button"
                 className={`flow-tab ${file === activeFile ? "active" : ""}`}
-                onClick={() => navigate(file, null)}
               >
-                {f.wiring.name}
-                <FlowStatusBadge status={f.status} />
-              </button>
+                <button
+                  type="button"
+                  className="flow-tab-main"
+                  onClick={() => navigate(file, null)}
+                  onDoubleClick={() => setFlowDetailFile(file)}
+                  title="Double-click for details"
+                >
+                  <StatusDot status={f.status} />
+                  {f.wiring.name}
+                </button>
+                <button
+                  type="button"
+                  className="flow-tab-delete"
+                  onClick={() =>
+                    setDeleteFlowTarget({ file, name: f.wiring.name })
+                  }
+                  title="Delete flow"
+                  aria-label={`Delete ${f.wiring.name}`}
+                >
+                  ✕
+                </button>
+              </div>
             );
           })}
         </div>
+        <button
+          type="button"
+          className="new-resource-button"
+          onClick={() => setNewFlowOpen(true)}
+          title="New flow"
+          aria-label="New flow"
+        >
+          + Flow
+        </button>
       </div>
       <div className="app-body">
         {(!isMobile || paletteOpen) && (
           <PaletteSidebar
             palette={state.palette}
             onOpenBlockEditor={setBlockEditorFile}
+            onDeleteBlock={(file, name) => setDeleteBlockTarget({ file, name })}
             onAddBlock={isMobile ? handleAddBlockFromPalette : undefined}
             onCloseMobile={isMobile ? () => setPaletteOpen(false) : undefined}
+            onNewBlock={() => setNewBlockOpen(true)}
           />
         )}
         <div className="canvas-area" style={{ position: "relative" }}>
@@ -220,6 +299,72 @@ function Shell() {
         <MonacoBlockEditor
           file={blockEditorFile}
           onClose={() => setBlockEditorFile(null)}
+        />
+      )}
+      {deleteBlockTarget && (
+        <ConfirmDialog
+          title="Delete block"
+          message={
+            <>
+              Delete <code>{deleteBlockTarget.name}</code>? This removes its
+              source file and can't be undone. Blocks still in use by a node
+              can't be deleted.
+            </>
+          }
+          confirmLabel="Delete"
+          onClose={() => setDeleteBlockTarget(null)}
+          onConfirm={async () => {
+            const r = await send({
+              type: "block.delete",
+              requestId: generateRequestId(),
+              file: deleteBlockTarget.file,
+            });
+            if (r.type !== "block.deleteResult") {
+              return { ok: false, error: "unexpected response from server" };
+            }
+            return r;
+          }}
+        />
+      )}
+      {deleteFlowTarget && (
+        <ConfirmDialog
+          title="Delete flow"
+          message={
+            <>
+              Delete <code>{deleteFlowTarget.name}</code>? This removes its
+              wiring file and stops it running — can't be undone.
+            </>
+          }
+          confirmLabel="Delete"
+          onClose={() => setDeleteFlowTarget(null)}
+          onConfirm={async () => {
+            const r = await send({
+              type: "flow.delete",
+              requestId: generateRequestId(),
+              file: deleteFlowTarget.file,
+            });
+            if (r.type !== "flow.deleteResult") {
+              return { ok: false, error: "unexpected response from server" };
+            }
+            return r;
+          }}
+        />
+      )}
+      {flowDetailEntry && (
+        <FlowDetailModal
+          entry={flowDetailEntry}
+          onClose={() => setFlowDetailFile(null)}
+        />
+      )}
+      {statsOpen && <SystemStatsModal onClose={() => setStatsOpen(false)} />}
+      {newFlowOpen && <NewFlowDialog onClose={() => setNewFlowOpen(false)} />}
+      {newBlockOpen && (
+        <NewBlockDialog
+          onClose={() => setNewBlockOpen(false)}
+          onCreated={(file) => {
+            setNewBlockOpen(false);
+            setBlockEditorFile(file);
+          }}
         />
       )}
     </>

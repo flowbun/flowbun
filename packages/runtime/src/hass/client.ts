@@ -27,6 +27,17 @@ export interface SimpleHass {
     string,
     Record<string, (args?: Record<string, unknown>) => Promise<unknown>>
   >;
+  entity: {
+    listEntities(): string[];
+    getCurrentState(
+      entityId: string,
+    ): { attributes?: { friendly_name?: string } } | undefined;
+  };
+}
+
+export interface HassEntitySummary {
+  id: string;
+  friendlyName?: string;
 }
 
 let hassPromise: Promise<SimpleHass> | null = null;
@@ -38,6 +49,18 @@ export function getHass(): Promise<SimpleHass> {
     );
   }
   return hassPromise;
+}
+
+/**
+ * Read-only enumeration for the editor's entity autocomplete — never touches
+ * hass.call, so it's safe regardless of isDryRun().
+ */
+export async function listHassEntities(): Promise<HassEntitySummary[]> {
+  const hass = await getHass();
+  return hass.entity.listEntities().map((id) => ({
+    id,
+    friendlyName: hass.entity.getCurrentState(id)?.attributes?.friendly_name,
+  }));
 }
 
 let dryRun: boolean | null = null;

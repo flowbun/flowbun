@@ -130,6 +130,22 @@ export function applyMutation(
       );
       break;
     }
+    case "wire.rewire": {
+      const idx = current.wires.findIndex(
+        ([a, b]) => a === mutation.from && b === mutation.to,
+      );
+      // Same idempotent-no-op posture as wire.remove: the wire the canvas
+      // thought it was retargeting is already gone (a concurrent edit, or
+      // this same click landing twice).
+      if (idx === -1) break;
+      edit(
+        ["wires"],
+        current.wires.map((wire, i) =>
+          i === idx ? [mutation.newFrom, mutation.newTo] : wire,
+        ),
+      );
+      break;
+    }
   }
 
   const result = WiringSchema.safeParse(JSON.parse(text));

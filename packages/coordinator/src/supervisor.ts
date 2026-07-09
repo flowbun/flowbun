@@ -208,22 +208,38 @@ export class Supervisor {
     setTimeout(() => this.spawn(rt), delay);
   }
 
+  /** Sends "shutdown", waits (up to 3s) for a graceful exit, force-kills
+   * otherwise. Shared by restartFlow (which respawns after) and stopFlow
+   * (which doesn't). */
+  private async shutdownCurrent(rt: FlowRuntime): Promise<void> {
+    if (!rt.subprocess) return;
+    rt.expectingExit = true;
+    rt.subprocess.send({ type: "shutdown" } satisfies CoordinatorToFlowHost);
+    const exitedInTime = await Promise.race([
+      rt.subprocess.exited.then(() => true),
+      new Promise<false>((r) => setTimeout(() => r(false), 3000)),
+    ]);
+    if (!exitedInTime) rt.subprocess.kill("SIGKILL");
+  }
+
   /** Reload path — caller (main.ts) has already run and passed the typecheck gate. */
   async restartFlow(flowName: string): Promise<void> {
     const rt = this.flows.get(flowName);
     if (!rt) return;
     rt.crashTimestamps = []; // a deliberate, successful reload earns a fresh crash-loop window
-    if (rt.subprocess) {
-      rt.expectingExit = true;
-      rt.subprocess.send({ type: "shutdown" } satisfies CoordinatorToFlowHost);
-      const exitedInTime = await Promise.race([
-        rt.subprocess.exited.then(() => true),
-        new Promise<false>((r) => setTimeout(() => r(false), 3000)),
-      ]);
-      if (!exitedInTime) rt.subprocess.kill("SIGKILL");
-    }
+    await this.shutdownCurrent(rt);
     this.setStatus(rt, { kind: "starting" });
     this.spawn(rt); // also clears stale HA listeners from the old process — see spawn()'s own comment
+  }
+
+  /** Stops a flow's subprocess and forgets it entirely (unlike restartFlow,
+   * doesn't respawn) — used when its wiring file is deleted from disk. */
+  async stopFlow(flowName: string): Promise<void> {
+    const rt = this.flows.get(flowName);
+    if (!rt) return;
+    await this.shutdownCurrent(rt);
+    this.haRelay.unsubscribeFlow(rt.flowName);
+    this.flows.delete(flowName);
   }
 
   markFailedTypecheck(flowName: string, output: string): void {

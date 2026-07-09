@@ -15,10 +15,24 @@ export interface BlockNodeData extends Record<string, unknown> {
   disabled: boolean;
 }
 
+/** Every wire's edge.data — the actual port names, since handles no longer
+ * disambiguate them (see BlockNode's single shared handle per side). */
+export interface WireEdgeData extends Record<string, unknown> {
+  sourcePort: string;
+  targetPort: string;
+  /** The wiring's own `name` field (not the filename) — matches the `flow`
+   * field on every log entry, so DeletableEdge can key into
+   * FlowbunSocketContext's activity map for its wire-activity dots. */
+  flowName: string;
+  /** Wiring file this edge belongs to — stitched in by FlowCanvas, not here
+   * (useFlowGraph has no notion of "which file", only a Wiring value). */
+  file?: string;
+}
+
 export function useFlowGraph(
   wiring: Wiring | undefined,
   palette: BlockPaletteEntry[],
-): { nodes: Node<BlockNodeData>[]; edges: Edge[] } {
+): { nodes: Node<BlockNodeData>[]; edges: Edge<WireEdgeData>[] } {
   return useMemo(() => {
     if (!wiring) return { nodes: [], edges: [] };
     const auto = autoLayout(wiring);
@@ -39,15 +53,23 @@ export function useFlowGraph(
       }),
     );
 
-    const edges: Edge[] = wiring.wires.map(([from, to], i) => {
+    const edges: Edge<WireEdgeData>[] = wiring.wires.map(([from, to], i) => {
       const src = parsePortRef(from);
       const dst = parsePortRef(to);
       return {
         id: `${from}->${to}#${i}`,
         source: src.nodeId,
-        sourceHandle: src.port,
         target: dst.nodeId,
-        targetHandle: dst.port,
+        // No sourceHandle/targetHandle: every node now has exactly one
+        // handle per side (see BlockNode), so there's nothing to select —
+        // the actual port this wire is bound to lives in `data` instead,
+        // read by DeletableEdge for its curved labels and by FlowCanvas's
+        // onEdgesDelete to reconstruct the wire.remove mutation.
+        data: {
+          sourcePort: src.port,
+          targetPort: dst.port,
+          flowName: wiring.name,
+        },
       };
     });
 

@@ -193,6 +193,35 @@ describe("applyMutation round-trip fidelity", () => {
     expect(JSON.parse(mutated).wires).toEqual([]);
   });
 
+  test("wire.rewire retargets one end of a wire, leaving the other end and every other wire untouched", () => {
+    const original = readFileSync(FILE, "utf8");
+    const mutated = applyMutation(original, {
+      op: "wire.rewire",
+      from: "decide.command",
+      to: "lights.call",
+      newFrom: "decide.other_output",
+      newTo: "lights.call",
+    });
+    const parsed = JSON.parse(mutated);
+    expect(parsed.wires).toEqual([
+      ["motion.changed", "settle.signal"],
+      ["settle.stable", "decide.presence"],
+      ["decide.other_output", "lights.call"],
+    ]);
+  });
+
+  test("wire.rewire on an already-gone wire is an idempotent no-op, not an error", () => {
+    const original = readFileSync(FILE, "utf8");
+    const mutated = applyMutation(original, {
+      op: "wire.rewire",
+      from: "no.such",
+      to: "wire.here",
+      newFrom: "no.such",
+      newTo: "wire.there",
+    });
+    expect(mutated).toBe(original);
+  });
+
   test("node.config on a nonexistent node throws rather than silently creating an invalid node", () => {
     const original = readFileSync(FILE, "utf8");
     // jsonc-parser's modify() would happily create {"nodes":{"does-not-exist":{"config":{}}}}

@@ -1,7 +1,21 @@
 import { Database } from "bun:sqlite";
 
-export function openStateDb(path: string): Database {
-  const db = new Database(path, { create: true });
+/**
+ * `safeIntegers` defaults off (unchanged existing behavior for block/flow
+ * state reads — none of it touches raw INTEGER columns directly, `value`
+ * is always JSON text) — pass `true` for a connection that needs to
+ * faithfully round-trip arbitrary large integers instead of silently
+ * losing precision past Number.MAX_SAFE_INTEGER (the coordinator's DB
+ * REPL is the one caller that does, since a user can query anything).
+ */
+export function openStateDb(
+  path: string,
+  options?: { safeIntegers?: boolean },
+): Database {
+  const db = new Database(path, {
+    create: true,
+    safeIntegers: options?.safeIntegers ?? false,
+  });
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(`

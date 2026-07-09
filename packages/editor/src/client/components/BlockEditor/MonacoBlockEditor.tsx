@@ -82,6 +82,12 @@ export function MonacoBlockEditor({
 
   const handleMount: OnMount = (editorInstance, monaco) => {
     editorRef.current = editorInstance;
+    // Without this, DOM focus stays wherever it was before the panel opened
+    // (e.g. the node the user double-clicked) — the first keystrokes then
+    // land on whatever's behind this overlay (the still-mounted FlowCanvas)
+    // instead of Monaco, most noticeably swallowing Space since ReactFlow
+    // treats it as its pan-activation key by default.
+    editorInstance.focus();
     // Ctrl/Cmd+S has no reliable equivalent from a mobile virtual keyboard —
     // the header's Save button (below) is the primary path there, but this
     // still works wherever a real keyboard is attached.
