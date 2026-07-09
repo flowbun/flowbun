@@ -4,5 +4,10 @@ node_modules/
 *.sqlite-wal
 *.sqlite-shm
 data/generated/
+# data/blocks and data/wiring are now snapshotted in their own dedicated git
+# repo at data/.git instead of the main app repo — see git-snapshot.ts.
+data/blocks/
+data/wiring/
+data/.gitignore
 dist/
 *.log
