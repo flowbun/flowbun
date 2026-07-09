@@ -1,6 +1,10 @@
 import { join, relative } from "node:path";
 import type { AnyBlockDef } from "../block";
+import coreDebug from "../core/debug";
+import coreInject from "../core/inject";
+import coreScheduler from "../core/scheduler";
 import hassAction from "../hass/action";
+import hassRead from "../hass/read";
 import hassTrigger from "../hass/trigger";
 import type { BlockRegistry } from "../wiring/flow-assembly";
 
@@ -35,6 +39,26 @@ export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
     def: hassAction,
     specifier: "flowbun/hass/action",
     modulePath: "flowbun/hass/action",
+  });
+  registry.set("@core/scheduler", {
+    def: coreScheduler,
+    specifier: "flowbun/core/scheduler",
+    modulePath: "flowbun/core/scheduler",
+  });
+  registry.set("@hass/read", {
+    def: hassRead,
+    specifier: "flowbun/hass/read",
+    modulePath: "flowbun/hass/read",
+  });
+  registry.set("@core/inject", {
+    def: coreInject,
+    specifier: "flowbun/core/inject",
+    modulePath: "flowbun/core/inject",
+  });
+  registry.set("@core/debug", {
+    def: coreDebug,
+    specifier: "flowbun/core/debug",
+    modulePath: "flowbun/core/debug",
   });
 
   const blocksDir = join(dataDir, "blocks");

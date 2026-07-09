@@ -7,6 +7,8 @@ import {
   openStateDb,
   Router,
 } from "flowbun";
+import type { SchedulerConfig } from "flowbun/core/scheduler";
+import { registerScheduler } from "flowbun/core/scheduler";
 import type {
   CoordinatorToFlowHost,
   FlowHostToCoordinator,
@@ -77,6 +79,40 @@ async function main(): Promise<void> {
       router.emitFromSource(msg.nodeId, msg.port, msg.payload, msg.traceId);
     } else if (msg.type === "hass.action.result") {
       (executor as DistributedExecutor).handleActionResult(msg);
+    } else if (msg.type === "hass.read.result") {
+      (executor as DistributedExecutor).handleReadResult(msg);
+    } else if (msg.type === "flow.fireNode") {
+      const node = flow.nodes.get(msg.nodeId);
+      if (!node) {
+        send({
+          type: "flow.fireNode.result",
+          requestId: msg.requestId,
+          ok: false,
+          error: `no such node "${msg.nodeId}"`,
+        });
+      } else if (node.block.name !== "@core/inject") {
+        send({
+          type: "flow.fireNode.result",
+          requestId: msg.requestId,
+          ok: false,
+          error: `node "${msg.nodeId}" is not a @core/inject node`,
+        });
+      } else if (node.disabled) {
+        send({
+          type: "flow.fireNode.result",
+          requestId: msg.requestId,
+          ok: false,
+          error: `node "${msg.nodeId}" is disabled`,
+        });
+      } else {
+        router.emitFromSource(msg.nodeId, "fired", { at: Date.now() });
+        logger.info("inject.fired", { node: msg.nodeId });
+        send({
+          type: "flow.fireNode.result",
+          requestId: msg.requestId,
+          ok: true,
+        });
+      }
     } else if (msg.type === "shutdown") {
       void shutdown();
     }
@@ -85,10 +121,20 @@ async function main(): Promise<void> {
   await workerManager.startAll();
 
   let reqId = 1;
+  const stopSchedulers: Array<() => void> = [];
   for (const [nodeId, node] of flow.nodes) {
     if (node.block.name === "@hass/trigger" && !node.disabled) {
       const entity = (node.config as { entity: string }).entity;
       send({ type: "hass.subscribe", requestId: reqId++, nodeId, entity });
+    } else if (node.block.name === "@core/scheduler" && !node.disabled) {
+      // Runs entirely locally — unlike @hass/trigger, a timer isn't a shared
+      // external resource the coordinator needs to own, so this never goes
+      // over IPC (see core/scheduler.ts's own doc comment).
+      stopSchedulers.push(
+        registerScheduler(node.config as SchedulerConfig, (payload) =>
+          router.emitFromSource(nodeId, "fired", payload),
+        ),
+      );
     }
   }
 
@@ -96,6 +142,7 @@ async function main(): Promise<void> {
   logger.info("flow-host.ready", { pid: process.pid });
 
   async function shutdown(): Promise<void> {
+    for (const stop of stopSchedulers) stop();
     await workerManager.stopAll();
     db.close();
     process.exit(0);

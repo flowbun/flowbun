@@ -221,6 +221,7 @@ export type ClientToServer =
   | { type: "block.delete"; requestId: string; file: string }
   | { type: "flow.delete"; requestId: string; file: string }
   | { type: "flow.restart"; requestId: string; flow: string }
+  | { type: "flow.fireNode"; requestId: string; flow: string; nodeId: string }
   | { type: "wiring.undo"; requestId: string; file: string }
   | { type: "wiring.redo"; requestId: string; file: string }
   | { type: "block.undo"; requestId: string; file: string }
@@ -331,6 +332,8 @@ export type ServerToClient =
   | { type: "flow.deleteResult"; requestId: string; ok: false; error: string }
   | { type: "flow.restartResult"; requestId: string; ok: true }
   | { type: "flow.restartResult"; requestId: string; ok: false; error: string }
+  | { type: "flow.fireNodeResult"; requestId: string; ok: true }
+  | { type: "flow.fireNodeResult"; requestId: string; ok: false; error: string }
   | {
       type: "flow.createResult";
       requestId: string;

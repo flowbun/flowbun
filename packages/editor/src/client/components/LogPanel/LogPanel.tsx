@@ -42,6 +42,10 @@ export function LogPanel({
     "flowbun.logPanel.flowFilter",
     "",
   );
+  const [nodeFilter, setNodeFilter] = usePersistedState(
+    "flowbun.logPanel.nodeFilter",
+    "",
+  );
   const [levelFilter, setLevelFilter] = usePersistedState(
     "flowbun.logPanel.levelFilter",
     "",
@@ -65,10 +69,25 @@ export function LogPanel({
     invert: true,
   });
 
+  // Scoped to the current flow filter (when set) — matches the natural
+  // "pick a flow, then pick a node within it" workflow of dropping a
+  // @core/debug node into a specific flow and finding it here. Derived
+  // straight from `logs` (every LogRecord already carries its own nodeId,
+  // attached automatically by worker-manager.ts) rather than a server-sent
+  // prop — no protocol change needed for this.
+  const nodeOptions = useMemo(() => {
+    const ids = new Set<string>();
+    for (const e of logs) {
+      if (e.nodeId && (!flowFilter || e.flow === flowFilter)) ids.add(e.nodeId);
+    }
+    return [...ids].sort();
+  }, [logs, flowFilter]);
+
   const filtered = useMemo(() => {
     return logs.filter((e) => {
       if (e.at <= clearedAt) return false;
       if (flowFilter && e.flow !== flowFilter) return false;
+      if (nodeFilter && e.nodeId !== nodeFilter) return false;
       if (levelFilter && e.level !== levelFilter) return false;
       if (
         text &&
@@ -81,7 +100,7 @@ export function LogPanel({
       }
       return true;
     });
-  }, [logs, flowFilter, levelFilter, text, clearedAt]);
+  }, [logs, flowFilter, nodeFilter, levelFilter, text, clearedAt]);
 
   // Starts true (a freshly opened log panel should show the latest entries,
   // same as tailing a file) — flips off the moment the user's own scrolling
@@ -168,12 +187,29 @@ export function LogPanel({
           <>
             <select
               value={flowFilter}
-              onChange={(e) => setFlowFilter(e.target.value)}
+              onChange={(e) => {
+                setFlowFilter(e.target.value);
+                // A node filter carried over from a different flow would
+                // just silently show zero results — clear it along with
+                // the flow switch instead.
+                setNodeFilter("");
+              }}
             >
               <option value="">all flows</option>
               {flows.map((f) => (
                 <option key={f} value={f}>
                   {f}
+                </option>
+              ))}
+            </select>
+            <select
+              value={nodeFilter}
+              onChange={(e) => setNodeFilter(e.target.value)}
+            >
+              <option value="">all nodes</option>
+              {nodeOptions.map((n) => (
+                <option key={n} value={n}>
+                  {n}
                 </option>
               ))}
             </select>

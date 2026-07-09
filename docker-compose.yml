@@ -14,4 +14,4 @@ services:
       # Live: battery_controller (and any other @hass/action node) sends
       # real service calls to Home Assistant instead of just logging them.
       # See packages/runtime/src/hass/client.ts's isDryRun().
-      FLOWBUN_DRY_RUN: "true"
+      FLOWBUN_DRY_RUN: "false"

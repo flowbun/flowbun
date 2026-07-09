@@ -1,7 +1,11 @@
 import type { ActionCall } from "flowbun/hass/action";
 import { performHassAction } from "flowbun/hass/action";
-import type { HassEntitySummary } from "flowbun/hass/client";
+import type {
+  EntityStateReading,
+  HassEntitySummary,
+} from "flowbun/hass/client";
 import { isDryRun, listHassEntities } from "flowbun/hass/client";
+import { performHassRead } from "flowbun/hass/read";
 import type { TriggerOutputs } from "flowbun/hass/trigger";
 import { registerHassTrigger } from "flowbun/hass/trigger";
 
@@ -69,6 +73,11 @@ export class HaRelay {
     const dryRun = dryRunOverride ?? isDryRun();
     await performHassAction(call, dryRun); // performHassAction itself lazily calls getHass() when !dryRun
     return { dryRun };
+  }
+
+  /** On-demand snapshot read of any entity's current state+attributes — always runs for real, no dry-run gate (see performHassRead's own comment). */
+  read(entity: string): Promise<EntityStateReading> {
+    return performHassRead(entity);
   }
 
   /** Powers the editor's entity autocomplete (see ConfigEditor.tsx). */

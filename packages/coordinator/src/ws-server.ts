@@ -366,6 +366,24 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             }
             break;
           }
+          case "flow.fireNode": {
+            const result = await deps.supervisor.fireNode(msg.flow, msg.nodeId);
+            reply(
+              result.ok
+                ? {
+                    type: "flow.fireNodeResult",
+                    requestId: msg.requestId,
+                    ok: true,
+                  }
+                : {
+                    type: "flow.fireNodeResult",
+                    requestId: msg.requestId,
+                    ok: false,
+                    error: result.error ?? "unknown error",
+                  },
+            );
+            break;
+          }
           case "flow.create": {
             try {
               const { file, wiring } = await deps.createFlow(msg.name);

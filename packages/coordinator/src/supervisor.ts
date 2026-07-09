@@ -29,6 +29,16 @@ interface FlowRuntime {
 
 export class Supervisor {
   private flows = new Map<string, FlowRuntime>();
+  // Coordinator-side mirror of DistributedExecutor's pendingActions/
+  // pendingReads pattern (packages/flow-host/src/distributed-executor.ts),
+  // reversed: this is the one coordinator-initiated request/response pair
+  // (fireNode), where every other hass.*.call/result pair is flow-host-
+  // initiated instead.
+  private pendingFires = new Map<
+    number,
+    (result: { ok: boolean; error?: string }) => void
+  >();
+  private nextFireRequestId = 1;
 
   constructor(
     private readonly dataDir: string,
@@ -137,6 +147,33 @@ export class Supervisor {
           },
         );
         break;
+      case "hass.read.call":
+        this.haRelay.read(msg.entity).then(
+          (reading) => {
+            subprocess.send({
+              type: "hass.read.result",
+              requestId: msg.requestId,
+              ok: true,
+              reading,
+            } satisfies CoordinatorToFlowHost);
+          },
+          (err) => {
+            subprocess.send({
+              type: "hass.read.result",
+              requestId: msg.requestId,
+              ok: false,
+              error: String(err),
+            } satisfies CoordinatorToFlowHost);
+          },
+        );
+        break;
+      case "flow.fireNode.result": {
+        const resolve = this.pendingFires.get(msg.requestId);
+        if (!resolve) break;
+        this.pendingFires.delete(msg.requestId);
+        resolve(msg.ok ? { ok: true } : { ok: false, error: msg.error });
+        break;
+      }
       case "log":
         for (const entry of msg.entries) {
           this.logBuffer.push(entry);
@@ -240,6 +277,29 @@ export class Supervisor {
     await this.shutdownCurrent(rt);
     this.haRelay.unsubscribeFlow(rt.flowName);
     this.flows.delete(flowName);
+  }
+
+  /** Relays a manual @core/inject fire (from the editor's canvas button) to the owning flow-host, awaiting its ack. */
+  fireNode(
+    flowName: string,
+    nodeId: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const rt = this.flows.get(flowName);
+    if (!rt?.subprocess) {
+      return Promise.resolve({
+        ok: false,
+        error: `flow "${flowName}" is not running`,
+      });
+    }
+    const requestId = this.nextFireRequestId++;
+    rt.subprocess.send({
+      type: "flow.fireNode",
+      requestId,
+      nodeId,
+    } satisfies CoordinatorToFlowHost);
+    return new Promise((resolve) => {
+      this.pendingFires.set(requestId, resolve);
+    });
   }
 
   markFailedTypecheck(flowName: string, output: string): void {

@@ -5,6 +5,8 @@ import type {
   NodeExecutor,
 } from "flowbun";
 import type { ActionCall, ActionConfig } from "flowbun/hass/action";
+import type { EntityStateReading } from "flowbun/hass/client";
+import type { ReadConfig } from "flowbun/hass/read";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { WorkerManager } from "./worker-manager";
 
@@ -13,16 +15,24 @@ interface PendingAction {
   reject: (e: Error) => void;
 }
 
+interface PendingRead {
+  resolve: (reading: EntityStateReading) => void;
+  reject: (e: Error) => void;
+}
+
 /**
  * The flow-host's NodeExecutor: ordinary nodes go to a persistent Worker
- * (WorkerManager); @hass/action nodes are relayed to the coordinator over
- * IPC instead of ever calling their process() — the coordinator is the only
- * process holding the real HA connection. @hass/trigger nodes never reach
- * execute() at all (no wire can target their empty inputs).
+ * (WorkerManager); @hass/action and @hass/read nodes are relayed to the
+ * coordinator over IPC instead of ever calling their process() — the
+ * coordinator is the only process holding the real HA connection.
+ * @hass/trigger and @core/scheduler nodes never reach execute() at all (no
+ * wire can target their empty inputs).
  */
 export class DistributedExecutor implements NodeExecutor {
   private pendingActions = new Map<number, PendingAction>();
   private nextActionRequestId = 1;
+  private pendingReads = new Map<number, PendingRead>();
+  private nextReadRequestId = 1;
 
   constructor(
     private readonly deps: {
@@ -43,6 +53,11 @@ export class DistributedExecutor implements NodeExecutor {
       const call = req.inputs.call as ActionCall;
       const config = node.config as ActionConfig;
       return this.callHassAction(node.nodeId, config, call);
+    }
+
+    if (node.block.name === "@hass/read") {
+      const config = node.config as ReadConfig;
+      return this.callHassRead(node.nodeId, config.entity);
     }
 
     const requestId = this.deps.workerManager.allocRequestId();
@@ -82,6 +97,40 @@ export class DistributedExecutor implements NodeExecutor {
         reject,
       });
     });
+  }
+
+  private callHassRead(
+    nodeId: string,
+    entity: string,
+  ): Promise<Record<string, unknown>> {
+    const requestId = this.nextReadRequestId++;
+    this.deps.send({
+      type: "hass.read.call",
+      requestId,
+      nodeId,
+      entity,
+    });
+    return new Promise((resolve, reject) => {
+      this.pendingReads.set(requestId, {
+        resolve: (reading) => resolve({ result: reading }),
+        reject,
+      });
+    });
+  }
+
+  handleReadResult(
+    msg: Extract<CoordinatorToFlowHost, { type: "hass.read.result" }>,
+  ): void {
+    const pending = this.pendingReads.get(msg.requestId);
+    if (!pending) return;
+    this.pendingReads.delete(msg.requestId);
+    if (msg.ok) {
+      this.deps.log.info("hass.read", { entity: msg.reading.entity });
+      pending.resolve(msg.reading);
+    } else {
+      this.deps.log.error("hass.read_failed", { error: msg.error });
+      pending.reject(new Error(msg.error));
+    }
   }
 
   handleActionResult(

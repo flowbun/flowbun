@@ -5,16 +5,21 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./core/scheduler": "./src/core/scheduler.ts",
+    "./core/inject": "./src/core/inject.ts",
+    "./core/debug": "./src/core/debug.ts",
     "./hass/trigger": "./src/hass/trigger.ts",
     "./hass/action": "./src/hass/action.ts",
+    "./hass/read": "./src/hass/read.ts",
     "./hass/client": "./src/hass/client.ts",
     "./ipc": "./src/ipc/protocol.ts",
     "./ws": "./src/ws/protocol.ts",
     "./wiring": "./src/wiring/schema.ts"
   },
   "dependencies": {
-    "zod": "^4.1.0",
-    "@digital-alchemy/hass": "^26.6.13"
+    "@digital-alchemy/hass": "^26.6.13",
+    "suncalc": "^2.0.0",
+    "zod": "^4.1.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

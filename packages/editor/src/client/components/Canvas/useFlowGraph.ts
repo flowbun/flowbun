@@ -13,6 +13,10 @@ export interface BlockNodeData extends Record<string, unknown> {
   config: unknown;
   def: BlockPaletteEntry | undefined;
   disabled: boolean;
+  /** The wiring's own `name` field (not the filename) — same field, same
+   * rationale as WireEdgeData.flowName below: BlockNode needs it to send a
+   * flow.fireNode request for @core/inject nodes. */
+  flowName: string;
 }
 
 /** Every wire's edge.data — the actual port names, since handles no longer
@@ -49,6 +53,7 @@ export function useFlowGraph(
           config: n.config,
           def: byName.get(n.block),
           disabled: n.disabled ?? false,
+          flowName: wiring.name,
         },
       }),
     );

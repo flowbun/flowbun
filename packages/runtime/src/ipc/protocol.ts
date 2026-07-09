@@ -1,4 +1,5 @@
 import type { ActionCall } from "../hass/action";
+import type { EntityStateReading } from "../hass/client";
 import type { TriggerOutputs } from "../hass/trigger";
 
 /** One structured log/trace event, shaped for crossing process boundaries into the coordinator's ring buffer. */
@@ -28,6 +29,14 @@ export type CoordinatorToFlowHost =
       error: string;
       dryRun: boolean;
     }
+  | {
+      type: "hass.read.result";
+      requestId: number;
+      ok: true;
+      reading: EntityStateReading;
+    }
+  | { type: "hass.read.result"; requestId: number; ok: false; error: string }
+  | { type: "flow.fireNode"; requestId: number; nodeId: string }
   | { type: "shutdown" };
 
 // ---------- flow-host -> coordinator (Bun.spawn ipc) ----------
@@ -47,6 +56,19 @@ export type FlowHostToCoordinator =
       call: ActionCall;
       /** undefined means "defer to the coordinator's global isDryRun()". */
       dryRunOverride?: boolean;
+    }
+  | {
+      type: "hass.read.call";
+      requestId: number;
+      nodeId: string;
+      entity: string;
+    }
+  | { type: "flow.fireNode.result"; requestId: number; ok: true }
+  | {
+      type: "flow.fireNode.result";
+      requestId: number;
+      ok: false;
+      error: string;
     }
   | { type: "log"; entries: LogRecord[] };
 

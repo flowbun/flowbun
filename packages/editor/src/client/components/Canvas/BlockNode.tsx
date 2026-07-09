@@ -1,5 +1,7 @@
 import { Handle, type NodeProps, Position } from "@xyflow/react";
 import { formatClockTime } from "../../lib/formatTime";
+import { generateRequestId } from "../../lib/requestId";
+import { useFlowbunSocket } from "../../ws/FlowbunSocketContext";
 import { useLastProcessed } from "./LastProcessedContext";
 import type { BlockNodeData } from "./useFlowGraph";
 
@@ -9,6 +11,23 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
   const inputs = data.def ? Object.keys(data.def.inputs) : [];
   const outputs = data.def ? Object.keys(data.def.outputs) : [];
   const lastProcessedAt = useLastProcessed(data.nodeId);
+  const { send } = useFlowbunSocket();
+  const isInject = data.block === "@core/inject";
+  const injectLabel =
+    (isInject && (data.config as { label?: string } | undefined)?.label) ||
+    "Fire";
+
+  async function handleFire(): Promise<void> {
+    const result = await send({
+      type: "flow.fireNode",
+      requestId: generateRequestId(),
+      flow: data.flowName,
+      nodeId: data.nodeId,
+    });
+    if (result.type === "flow.fireNodeResult" && !result.ok) {
+      console.error("inject fire failed:", result.error);
+    }
+  }
 
   return (
     <div
@@ -61,6 +80,30 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
       >
         {data.block}
       </div>
+      {isInject && (
+        <div style={{ padding: "0 10px 8px" }}>
+          <button
+            type="button"
+            className="nodrag nopan"
+            disabled={data.disabled}
+            title={injectLabel}
+            onClick={handleFire}
+            style={{
+              width: "100%",
+              padding: "3px 8px",
+              fontSize: 11,
+              fontWeight: 600,
+              color: "var(--text)",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              cursor: data.disabled ? "not-allowed" : "pointer",
+            }}
+          >
+            ▶ {injectLabel}
+          </button>
+        </div>
+      )}
       {lastProcessedAt !== undefined && (
         <div
           title={`last processed at ${formatClockTime(lastProcessedAt)}`}
