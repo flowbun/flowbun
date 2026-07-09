@@ -9,6 +9,7 @@ import { PaletteSidebar } from "./components/Palette/PaletteSidebar";
 import { FlowDetailModal } from "./components/StatusBar/FlowDetailModal";
 import { StatusDot } from "./components/StatusBar/StatusDot";
 import { ConfirmDialog } from "./components/shared/ConfirmDialog";
+import { HistoryPanel } from "./components/shared/HistoryPanel";
 import { ResizeHandle } from "./components/shared/ResizeHandle";
 import { SystemStatsModal } from "./components/shared/SystemStatsModal";
 import { useIsMobile } from "./hooks/useIsMobile";
@@ -49,6 +50,7 @@ function Shell() {
   } | null>(null);
   const [flowDetailFile, setFlowDetailFile] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const activeFile = route.file ?? files[0] ?? null;
   const selectedNodeId = route.file ? route.nodeId : null;
@@ -161,6 +163,15 @@ function Shell() {
             aria-label="Redo"
           >
             ↻
+          </button>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen(true)}
+            disabled={!entry}
+            title="History"
+            aria-label="History"
+          >
+            🕘
           </button>
         </div>
         {isMobile && (
@@ -357,6 +368,13 @@ function Shell() {
         />
       )}
       {statsOpen && <SystemStatsModal onClose={() => setStatsOpen(false)} />}
+      {historyOpen && entry && (
+        <HistoryPanel
+          kind="wiring"
+          file={entry.file}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
       {newFlowOpen && <NewFlowDialog onClose={() => setNewFlowOpen(false)} />}
       {newBlockOpen && (
         <NewBlockDialog

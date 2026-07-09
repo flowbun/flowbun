@@ -973,6 +973,81 @@ body {
   color: var(--bg);
 }
 
+/* History panel (see HistoryPanel.tsx) — reuses .create-dialog-* for the
+   overlay/panel/actions chrome, just wider to fit a scrollable commit list. */
+
+.history-panel {
+  width: min(480px, 90vw);
+}
+
+.history-panel-loading,
+.history-panel-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.history-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.history-panel-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.history-panel-entry-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-panel-entry-message {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-panel-entry-date {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+.history-panel-restore {
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.history-panel-restore:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.history-panel-restore:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .create-dialog-submit:disabled,
 .create-dialog-submit-danger:disabled {
   opacity: 0.5;

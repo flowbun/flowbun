@@ -11,9 +11,11 @@ import {
 import type { FlowEntry, ServerToClient, TypecheckOutcome } from "flowbun/ws";
 import { runReplQuery } from "./db-repl";
 import { formatWithBiome } from "./format-block";
+import { createGitSnapshotter } from "./git-snapshot";
 import { HaRelay } from "./ha-relay";
 import { LogBuffer } from "./log-buffer";
 import { createReloadSerializer } from "./serialize-reload";
+import { createSnapshottingSerializer } from "./snapshotting-serializer";
 import { Supervisor } from "./supervisor";
 import { collectSystemStats } from "./system-stats";
 import { UndoStack } from "./undo-stack";
@@ -98,7 +100,8 @@ async function main(): Promise<void> {
   const logBuffer = new LogBuffer();
   const haRelay = new HaRelay();
   const flows = new Map<string, FlowEntry>();
-  const undoStack = new UndoStack();
+  const gitSnapshotter = createGitSnapshotter(DATA_DIR);
+  const undoStack = new UndoStack(gitSnapshotter);
   let broadcast: ((msg: ServerToClient) => void) | null = null;
   const recentSelfWrites = new Map<string, number>(); // absolute wiring/block file path -> Date.now()
 
@@ -148,7 +151,7 @@ async function main(): Promise<void> {
       file: rel,
       wiring,
       status: supervisor.getStatus(flow.name) ?? { kind: "starting" },
-      undo: undoStack.status(rel),
+      undo: undoStack.status(join("wiring", rel)),
     });
   }
 
@@ -171,10 +174,16 @@ async function main(): Promise<void> {
   // the deliberate simple choice: reload operations here are bursty and
   // human-paced, not a throughput-sensitive path. See serialize-reload.ts
   // for the mechanism itself and its unit tests.
-  const serializeReload = createReloadSerializer();
+  const serializeReload = createSnapshottingSerializer(
+    createReloadSerializer(),
+    gitSnapshotter,
+  );
 
-  async function reloadWiringFile(path: string): Promise<TypecheckOutcome> {
-    return serializeReload(() => reloadWiringFileInner(path));
+  async function reloadWiringFile(
+    path: string,
+    label?: string,
+  ): Promise<TypecheckOutcome> {
+    return serializeReload(() => reloadWiringFileInner(path), label);
   }
 
   async function reloadWiringFileInner(
@@ -194,13 +203,13 @@ async function main(): Promise<void> {
       file: rel,
       wiring,
       status: supervisor.getStatus(flow.name) ?? { kind: "starting" },
-      undo: undoStack.status(rel),
+      undo: undoStack.status(join("wiring", rel)),
     });
     broadcast?.({
       type: "flow.updated",
       file: rel,
       wiring,
-      undo: undoStack.status(rel),
+      undo: undoStack.status(join("wiring", rel)),
     });
     if (!recheck.ok) {
       supervisor.markFailedTypecheck(flow.name, recheck.output);
@@ -220,7 +229,9 @@ async function main(): Promise<void> {
   }
 
   /** Shared by both the fs-watcher and the ws block.write handler. */
-  async function reloadBlocksAndRestartAll(): Promise<TypecheckOutcome> {
+  async function reloadBlocksAndRestartAll(
+    label?: string,
+  ): Promise<TypecheckOutcome> {
     return serializeReload(async () => {
       registry = await discoverBlocks(DATA_DIR);
       const reloaded = await loadAllFlows(registry);
@@ -246,7 +257,7 @@ async function main(): Promise<void> {
         reloaded.map(({ flow }) => supervisor.restartFlow(flow.name)),
       );
       return { ok: true, output: recheck.output };
-    });
+    }, label);
   }
 
   /**
@@ -267,7 +278,8 @@ async function main(): Promise<void> {
     }
     const file = `${slug}.json`;
     const path = join(DATA_DIR, "wiring", file);
-    return serializeReload(async () => {
+    const relPath = join("wiring", file);
+    const result = await serializeReload(async () => {
       if (flows.has(file) || (await Bun.file(path).exists())) {
         throw new Error(`a flow named "${file}" already exists`);
       }
@@ -291,17 +303,19 @@ async function main(): Promise<void> {
         file,
         wiring,
         status: supervisor.getStatus(flow.name) ?? { kind: "starting" },
-        undo: undoStack.status(file),
+        undo: undoStack.status(relPath),
       });
       broadcast?.({
         type: "flow.updated",
         file,
         wiring,
-        undo: undoStack.status(file),
+        undo: undoStack.status(relPath),
       });
       console.log(`[coordinator] created flow "${flow.name}" (${file})`);
       return { file, wiring };
-    });
+    }, `create flow: ${file}`);
+    await undoStack.recordEdit(relPath);
+    return result;
   }
 
   /**
@@ -335,13 +349,14 @@ async function main(): Promise<void> {
     );
     recentSelfWrites.set(path, Date.now());
     await Bun.write(path, formatted);
-    const check = await reloadBlocksAndRestartAll();
+    const check = await reloadBlocksAndRestartAll(`create block: ${file}`);
     if (!check.ok) {
       // Can't actually happen for this hand-written skeleton, but stay
       // honest rather than assume — the same gate every other reload path
       // goes through.
       throw new Error(`new block failed typecheck:\n${check.output}`);
     }
+    await undoStack.recordEdit(join("blocks", file));
     console.log(`[coordinator] created block "${slug}" (${file})`);
     return { file, source: formatted };
   }
@@ -388,7 +403,7 @@ async function main(): Promise<void> {
     }
     recentSelfWrites.set(path, Date.now());
     await unlink(path);
-    const check = await reloadBlocksAndRestartAll();
+    const check = await reloadBlocksAndRestartAll(`delete block: ${file}`);
     if (!check.ok) {
       // Can't actually happen — an unreferenced block's removal can't
       // break a typecheck that never depended on it — but stay honest
@@ -398,6 +413,7 @@ async function main(): Promise<void> {
         `block deletion left flows failing typecheck:\n${check.output}`,
       );
     }
+    undoStack.forget(join("blocks", file));
     console.log(`[coordinator] deleted block "${blockName ?? file}" (${file})`);
   }
 
@@ -417,7 +433,7 @@ async function main(): Promise<void> {
     const path = join(DATA_DIR, "wiring", file);
     recentSelfWrites.set(path, Date.now());
     await unlink(path);
-    await handleWiringFileDeleted(path);
+    await handleWiringFileDeleted(path, `delete flow: ${file}`);
   }
 
   const wsServer = startWsServer(WS_PORT, {
@@ -427,6 +443,7 @@ async function main(): Promise<void> {
     logBuffer,
     flows,
     undoStack,
+    gitSnapshotter,
     getPalette: () => buildPalette(DATA_DIR, registry),
     reloadWiringFile,
     reloadBlocksAndRestartAll,
@@ -451,20 +468,26 @@ async function main(): Promise<void> {
    * known status (running, failed-typecheck, whatever) stuck in the flows
    * map and its flow-host subprocess still executing forever, since nothing
    * else ever notices the file is gone. */
-  async function handleWiringFileDeleted(path: string): Promise<void> {
-    return serializeReload(async () => {
-      const rel = basename(path);
-      const entry = flows.get(rel);
-      if (!entry) return; // already handled, or never existed
-      await supervisor.stopFlow(entry.wiring.name);
-      flows.delete(rel);
-      undoStack.forget(rel);
-      recentSelfWrites.delete(path);
-      broadcast?.({ type: "flow.removed", file: rel });
-      console.log(
-        `[coordinator] wiring file deleted, stopped flow "${entry.wiring.name}" (${rel})`,
-      );
-    });
+  async function handleWiringFileDeleted(
+    path: string,
+    label?: string,
+  ): Promise<void> {
+    return serializeReload(
+      async () => {
+        const rel = basename(path);
+        const entry = flows.get(rel);
+        if (!entry) return; // already handled, or never existed
+        await supervisor.stopFlow(entry.wiring.name);
+        flows.delete(rel);
+        undoStack.forget(join("wiring", rel));
+        recentSelfWrites.delete(path);
+        broadcast?.({ type: "flow.removed", file: rel });
+        console.log(
+          `[coordinator] wiring file deleted, stopped flow "${entry.wiring.name}" (${rel})`,
+        );
+      },
+      label ?? `delete flow: ${basename(path)}`,
+    );
   }
 
   const stopWatcher = startWatcher(DATA_DIR, async (scope) => {
@@ -480,7 +503,13 @@ async function main(): Promise<void> {
         return at !== undefined && now - at < SELF_WRITE_SUPPRESS_MS;
       });
       if (allSelfWrites) return;
-      await reloadBlocksAndRestartAll();
+      const names = scope.files.map((f) => basename(f));
+      await reloadBlocksAndRestartAll(
+        `external edit: blocks (${names.join(", ")})`,
+      );
+      await Promise.all(
+        names.map((name) => undoStack.recordEdit(join("blocks", name))),
+      );
     } else {
       const suppressedAt = recentSelfWrites.get(scope.file);
       if (
@@ -489,11 +518,16 @@ async function main(): Promise<void> {
       )
         return;
       if (!(await Bun.file(scope.file).exists())) {
-        await handleWiringFileDeleted(scope.file);
+        await handleWiringFileDeleted(
+          scope.file,
+          `external delete: ${basename(scope.file)}`,
+        );
         return;
       }
       try {
-        await reloadWiringFile(scope.file);
+        const name = basename(scope.file);
+        await reloadWiringFile(scope.file, `external edit: ${name}`);
+        await undoStack.recordEdit(join("wiring", name));
       } catch (err) {
         console.error(`[coordinator] failed to read ${scope.file}: ${err}`);
       }

@@ -63,6 +63,15 @@ export interface HassEntitySummary {
   friendlyName?: string;
 }
 
+/** One commit touching a file under data/ — see coordinator's
+ * git-snapshot.ts (this is the wire-format mirror of its HistoryEntry,
+ * same duplication pattern as HassEntitySummary above). */
+export interface HistoryEntry {
+  hash: string;
+  date: string;
+  message: string;
+}
+
 /** Snapshot of coordinator/system telemetry — gathered fresh on each
  * "system.stats" request (see coordinator/src/main.ts's collectSystemStats),
  * not pushed/streamed, since this is a "check in on it" view (the About
@@ -173,11 +182,26 @@ export type ClientToServer =
   | { type: "flow.restart"; requestId: string; flow: string }
   | { type: "wiring.undo"; requestId: string; file: string }
   | { type: "wiring.redo"; requestId: string; file: string }
+  | { type: "block.undo"; requestId: string; file: string }
+  | { type: "block.redo"; requestId: string; file: string }
   | { type: "flow.create"; requestId: string; name: string }
   | { type: "block.create"; requestId: string; name: string }
   | { type: "hass.entities"; requestId: string }
   | { type: "system.stats"; requestId: string }
-  | { type: "db.query"; requestId: string; sql: string };
+  | { type: "db.query"; requestId: string; sql: string }
+  | {
+      type: "history.list";
+      requestId: string;
+      kind: "wiring" | "block";
+      file: string;
+    }
+  | {
+      type: "history.restore";
+      requestId: string;
+      kind: "wiring" | "block";
+      file: string;
+      hash: string;
+    };
 
 // ---------- coordinator -> browser ----------
 export type ServerToClient =
@@ -226,10 +250,38 @@ export type ServerToClient =
       /** The text actually written to disk — may differ from what the
        * client sent if it was reformatted by Biome on save. */
       source: string;
+      /** Blocks have no snapshot/broadcast channel the way wiring files do
+       * (see FlowEntry.undo) — the Monaco editor's undo/redo buttons read
+       * this directly off every block.*Result instead. */
+      undo: UndoStatus;
     }
   | { type: "block.writeResult"; requestId: string; ok: false; error: string }
-  | { type: "block.readResult"; requestId: string; ok: true; source: string }
+  | {
+      type: "block.readResult";
+      requestId: string;
+      ok: true;
+      source: string;
+      undo: UndoStatus;
+    }
   | { type: "block.readResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "block.undoResult";
+      requestId: string;
+      ok: true;
+      source: string;
+      typecheck: TypecheckOutcome;
+      undo: UndoStatus;
+    }
+  | { type: "block.undoResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "block.redoResult";
+      requestId: string;
+      ok: true;
+      source: string;
+      typecheck: TypecheckOutcome;
+      undo: UndoStatus;
+    }
+  | { type: "block.redoResult"; requestId: string; ok: false; error: string }
   | { type: "block.deleteResult"; requestId: string; ok: true }
   | { type: "block.deleteResult"; requestId: string; ok: false; error: string }
   | { type: "flow.deleteResult"; requestId: string; ok: true }
@@ -276,4 +328,23 @@ export type ServerToClient =
     }
   | { type: "system.statsResult"; requestId: string; ok: false; error: string }
   | ({ type: "db.queryResult"; requestId: string; ok: true } & DbQueryOutcome)
-  | { type: "db.queryResult"; requestId: string; ok: false; error: string };
+  | { type: "db.queryResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "history.listResult";
+      requestId: string;
+      ok: true;
+      entries: HistoryEntry[];
+    }
+  | { type: "history.listResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "history.restoreResult";
+      requestId: string;
+      ok: true;
+      typecheck: TypecheckOutcome;
+    }
+  | {
+      type: "history.restoreResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    };

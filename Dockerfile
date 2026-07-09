@@ -2,6 +2,13 @@ FROM docker.io/oven/bun:1
 
 WORKDIR /app
 
+# git-snapshot.ts shells out to `git` to auto-commit data/blocks and
+# data/wiring on every write (see coordinator's git-snapshot.ts) — the base
+# image has no git binary, so without this the coordinator degrades
+# silently to "snapshotting disabled" in every deployed container.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first (better layer caching across data/source edits).
 COPY package.json bun.lock ./
 COPY packages/runtime/package.json packages/runtime/package.json

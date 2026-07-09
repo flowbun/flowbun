@@ -6,6 +6,29 @@ const FMT = { tabSize: 2, insertSpaces: true, eol: "\n" } as const;
 
 export class WiringWriteError extends Error {}
 
+/** A short human label for a mutation's git commit message — see
+ * snapshotting-serializer.ts. */
+export function describeMutation(mutation: WiringMutation): string {
+  switch (mutation.op) {
+    case "node.add":
+      return `add node: ${mutation.nodeId} (${mutation.block})`;
+    case "node.remove":
+      return `remove node: ${mutation.nodeId}`;
+    case "node.config":
+      return `node.config: ${mutation.nodeId}`;
+    case "node.position":
+      return `move node: ${mutation.nodeId}`;
+    case "node.disabled":
+      return `${mutation.disabled ? "disable" : "enable"} node: ${mutation.nodeId}`;
+    case "wire.add":
+      return `add wire: ${mutation.from} -> ${mutation.to}`;
+    case "wire.remove":
+      return `remove wire: ${mutation.from} -> ${mutation.to}`;
+    case "wire.rewire":
+      return `rewire: ${mutation.from} -> ${mutation.to}`;
+  }
+}
+
 /**
  * Applies exactly one mutation to a wiring file's raw text and returns the
  * new text — never touches disk itself (the caller writes after this

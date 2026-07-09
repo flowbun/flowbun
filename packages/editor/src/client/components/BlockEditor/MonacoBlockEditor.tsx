@@ -1,10 +1,11 @@
 import Editor, { type BeforeMount, type OnMount } from "@monaco-editor/react";
-import type { TypecheckOutcome } from "flowbun/ws";
-import { useEffect, useRef, useState } from "react";
+import type { TypecheckOutcome, UndoStatus } from "flowbun/ws";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { FLOWBUN_AMBIENT_TYPES } from "../../lib/flowbunAmbientTypes";
 import { generateRequestId } from "../../lib/requestId";
 import { useFlowbunSocket } from "../../ws/FlowbunSocketContext";
+import { HistoryPanel } from "../shared/HistoryPanel";
 
 // Monaco's TS worker is a singleton shared across every MonacoBlockEditor
 // mount (opening block A, closing it, opening block B all reuse the same
@@ -44,20 +45,36 @@ export function MonacoBlockEditor({
   const [source, setSource] = useState<string | null>(null);
   const [typecheck, setTypecheck] = useState<TypecheckOutcome | null>(null);
   const [saving, setSaving] = useState(false);
+  const [undo, setUndo] = useState<UndoStatus>({
+    canUndo: false,
+    canRedo: false,
+  });
+  const [historyOpen, setHistoryOpen] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
 
+  const loadSource = useCallback(
+    async (cancelledRef?: { current: boolean }) => {
+      const r = await send({
+        type: "block.read",
+        requestId: generateRequestId(),
+        file,
+      });
+      if (cancelledRef?.current) return;
+      if (r.type === "block.readResult" && r.ok) {
+        setSource(r.source);
+        setUndo(r.undo);
+      }
+    },
+    [file, send],
+  );
+
   useEffect(() => {
-    let cancelled = false;
-    send({ type: "block.read", requestId: generateRequestId(), file }).then(
-      (r) => {
-        if (cancelled) return;
-        if (r.type === "block.readResult" && r.ok) setSource(r.source);
-      },
-    );
+    const cancelledRef = { current: false };
+    loadSource(cancelledRef);
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
-  }, [file, send]);
+  }, [loadSource]);
 
   async function save(nextSource: string) {
     setSaving(true);
@@ -73,10 +90,24 @@ export function MonacoBlockEditor({
         // Biome may have reformatted the source on save (see ws-server.ts) —
         // reflect the actual on-disk text back into the editor so the
         // buffer never silently diverges from what was written.
-        if (r.ok) setSource(r.source);
+        if (r.ok) {
+          setSource(r.source);
+          setUndo(r.undo);
+        }
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function undoOrRedo(kind: "block.undo" | "block.redo") {
+    const r = await send({ type: kind, requestId: generateRequestId(), file });
+    if (r.type === "block.undoResult" || r.type === "block.redoResult") {
+      if (r.ok) {
+        setSource(r.source);
+        setTypecheck(r.typecheck);
+        setUndo(r.undo);
+      }
     }
   }
 
@@ -114,6 +145,32 @@ export function MonacoBlockEditor({
         <div className="block-editor-header">
           <strong>{file}</strong>
           <div className="block-editor-actions">
+            <button
+              type="button"
+              onClick={() => undoOrRedo("block.undo")}
+              disabled={!undo.canUndo}
+              title="Undo"
+              aria-label="Undo"
+            >
+              ↺
+            </button>
+            <button
+              type="button"
+              onClick={() => undoOrRedo("block.redo")}
+              disabled={!undo.canRedo}
+              title="Redo"
+              aria-label="Redo"
+            >
+              ↻
+            </button>
+            <button
+              type="button"
+              onClick={() => setHistoryOpen(true)}
+              title="History"
+              aria-label="History"
+            >
+              🕘
+            </button>
             <button
               type="button"
               disabled={saving}
@@ -154,6 +211,14 @@ export function MonacoBlockEditor({
             <pre className="typecheck-error">{typecheck.output}</pre>
           ))}
       </div>
+      {historyOpen && (
+        <HistoryPanel
+          kind="block"
+          file={file}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={() => loadSource()}
+        />
+      )}
     </div>
   );
 }
