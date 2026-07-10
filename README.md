@@ -4,6 +4,8 @@ A flow-based home automation runtime: functional core, TypeScript everywhere, Bu
 
 > **This project is heavily AI-written.** The architecture was planned and the vast majority of the code, tests, and documentation (including this file) were produced by an AI coding agent (Claude), working from a human-authored design brief and under human review at each phase. Treat it accordingly: read the code before trusting it, and expect the seams of AI-driven development — very consistent style, thorough inline rationale, and occasional over-engineering in places a human might have cut a corner. (Note from aquarat: this is a fun self-reflection)
 
+![The Flowbun editor: the block palette (core blocks and add-on blocks split into collapsible sections) on the left, a wired flow on the canvas, the chat panel open on the right mid-conversation with Claude about the current flow, and the live log panel filtered to one node's debug output along the bottom.](images/flowbun-fullflight.png)
+
 ## Why this exists
 
 (aquarat) [Node-RED](https://nodered.org/) is great - I've used it extensively for all kinds of automation, home and otherwise. But Node-RED has a number of deficiencies (as far as I'm concerned).
@@ -36,15 +38,16 @@ flowbun/
     runtime/            # the "flowbun" package — defineBlock, router, state, typecheck
       src/
         block.ts          # defineBlock + the BlockDef/BlockContext types every block is written against
-        discovery/          # scans data/blocks/*.ts and registers the built-in @hass/* blocks
+        discovery/          # scans data/blocks/*.ts and registers the built-in @hass/*/@core/* blocks
         wiring/               # Zod schema for wiring JSON, the loader, and flow assembly
         router/                 # message routing: mailboxes, sequence numbers, trace IDs, the Executor seam
         state/                    # the three-scope state API over bun:sqlite
         typecheck/                  # generates and runs the synthetic wire-assertion file (see below)
-        hass/                         # the only code allowed to talk to Home Assistant
-        ipc/                            # message types shared between coordinator and flow-host
-        ws/                               # flowbun/ws — the websocket protocol shared with the browser editor
-        demo/                               # the in-process headless milestone runner (Phase 1)
+        hass/                         # the only code allowed to talk to Home Assistant (@hass/trigger, @hass/action, @hass/read)
+        core/                           # built-in, non-HA blocks: @core/scheduler, @core/inject, @core/debug
+        ipc/                              # message types shared between coordinator and flow-host
+        ws/                                 # flowbun/ws — the websocket protocol shared with the browser editor
+        demo/                                 # the in-process headless milestone runner (Phase 1)
     flow-host/          # one OS process per flow — the real topology's per-flow half
       src/
         main.ts            # entrypoint: assembles its one flow, wires IPC to the coordinator
@@ -69,10 +72,11 @@ flowbun/
           layout/auto-layout.ts            # BFS longest-path layering for nodes with no saved position
           components/
             Canvas/          # React Flow canvas: nodes/edges from wiring, drag/connect/delete -> mutations
-            Palette/            # block palette + per-block config form
+            Palette/            # block palette: collapsible/resizable core-vs-add-on block sections
             LogPanel/              # live structured log viewer
             BlockEditor/              # Monaco block-source editing with live typecheck error surfacing
             StatusBar/                  # per-flow status badges (running/restarting/failed-typecheck/...)
+            ChatPanel/                     # chat panel: session picker, markdown-rendered replies, tool-call pills
   data/                 # a real flowbun "data directory" — bind-mounted into the container, not baked in
     blocks/               # one .ts file per block type, written against `flowbun`
     wiring/                 # one <flow-name>.json per flow — the actual source of truth
@@ -121,7 +125,9 @@ Anything crossing a genuine trust boundary — Home Assistant event payloads, th
 
 ### Effects live strictly at the boundary
 
-Only two block types can reach Home Assistant: `@hass/trigger` and `@hass/action`. Ordinary blocks import `defineBlock` (and whatever else they like — Zod, `fetch`, anything on npm) but are never handed a reference to the Home Assistant connection; the capability is simply never injected into their scope. This isn't a sandbox (a block *can* still shell out to any third-party API it wants — that's deliberate), it's a narrower guarantee: the one thing that can change the state of your physical house is confined to two well-known block types.
+Three block types can reach Home Assistant: `@hass/trigger`, `@hass/action`, and `@hass/read` — an on-demand snapshot read of any entity's live state *and* attributes, added once a flow needed something `@hass/trigger`'s watch-one-entity model couldn't give it (a sun-tracking blind controller needing `sun.sun`'s azimuth/elevation attributes on every scheduler tick, not just its coarse above/below-horizon state). Ordinary blocks import `defineBlock` (and whatever else they like — Zod, `fetch`, anything on npm) but are never handed a reference to the Home Assistant connection; the capability is simply never injected into their scope. This isn't a sandbox (a block *can* still shell out to any third-party API it wants — that's deliberate), it's a narrower guarantee: the one thing that can change the state of your physical house is confined to a small, well-known set of block types.
+
+Three more built-in blocks reach a capability narrower than Home Assistant but still outside a block's own pure `process()`: `@core/scheduler` (interval/daily-time/sunrise-sunset-relative triggers — the timer lives entirely in the flow-host process, no coordinator involvement at all, since a timer isn't a shared external resource the way an HA subscription is), `@core/inject` (a manual fire button rendered directly on the node in the editor canvas — Node-RED's "inject" node — routed browser → coordinator → the owning flow-host over a small `flow.fireNode` request, deliberately restricted to firing only `@core/inject` nodes rather than any node by name), and `@core/debug` (Node-RED's "debug" node: JSON-serializes whatever's wired into it — gracefully, not by crashing, for the circular-reference/bigint values `JSON.stringify` itself can't handle — and logs it under its own node id, so the editor's Logs panel can filter straight down to just that node's traffic).
 
 `@hass/action` also has a **dry-run mode** (`FLOWBUN_DRY_RUN`, defaulting to `"true"` — safe by default, a missing env var never accidentally enables real writes). In dry-run, it logs the exact service call it would have made instead of making it. This exists because Phase 1 was developed and demoed against a real, live Home Assistant instance, and the person doing that development wasn't ready for an AI-written runtime to start flipping real lights — dry-run made "prove the whole pipeline end-to-end, live" and "never actually write to the house" simultaneously true. A single node can also override the global setting with a raw `"dryRun": false` in its own wiring config (see `data/wiring/flowbun_test.json`) — deliberately *not* part of `@hass/action`'s typed config, so one flow can go live for real testing while every other flow on the same coordinator stays safely in dry-run.
 
@@ -161,7 +167,11 @@ Saving a wiring edit does **not** regenerate the file from the in-memory object.
 
 The editor's chat panel talks to a [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) `query()` loop running inside the coordinator process (`packages/coordinator/src/agent/`), given exactly one capability surface: an MCP server (`agent/mcp-server.ts`) whose tools call the *same* `wiring.mutate`/`block.write`/`createFlow`/`createBlock`/etc. functions the browser's websocket handlers already call (`agent/tools.ts`) — every built-in SDK tool (Bash, Read, Write, Edit, WebSearch, ...) is explicitly disabled (`tools: []`). Concretely, this means an agent edit is typechecked, git-committed, and undo-tracked exactly like a human edit, through the exact same code path — not a parallel, less-audited one. It's also why this feature was built *after*, not before, `data/`'s own git history above: the agent's write access is only as safe as the ability to see and revert exactly what it changed.
 
-Sessions are single and coordinator-global, not per-browser-connection — nothing else in this app has a per-user concept (every open tab already shares one `flows` map and one log stream), so the chat transcript is shared the same way. Authentication is a long-lived OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, minted once via `claude setup-token`) passed in through `.env` rather than baked into an image or committed anywhere — see [Setting up the Claude Code agent](#setting-up-the-claude-code-agent-optional) below. Claude's own conversation transcripts and session state still live under `data/agent/` (`CLAUDE_CONFIG_DIR`), the same bind-mounted, persists-across-rebuilds directory `data/blocks`/`data/wiring` do, but explicitly excluded from `data/`'s own git history (`data/.gitignore`), since transcripts can contain anything discussed in chat.
+The *currently active* session is single and coordinator-global, not per-browser-connection — nothing else in this app has a per-user concept (every open tab already shares one `flows` map and one log stream), so the chat transcript is shared the same way. Authentication is a long-lived OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, minted once via `claude setup-token`) passed in through `.env` rather than baked into an image or committed anywhere — see [Setting up the Claude Code agent](#setting-up-the-claude-code-agent-optional) below. Claude's own conversation transcripts and session state still live under `data/agent/` (`CLAUDE_CONFIG_DIR`), the same bind-mounted, persists-across-rebuilds directory `data/blocks`/`data/wiring` do, but explicitly excluded from `data/`'s own git history (`data/.gitignore`), since transcripts can contain anything discussed in chat.
+
+The chat panel can also start a new session or resume a previous one from a dropdown — sourced by reading the Claude Agent SDK's own on-disk transcripts directly (globbed from `$CLAUDE_CONFIG_DIR/projects/*/*.jsonl`, rather than reimplementing the SDK's private, version-dependent cwd-to-directory-name encoding scheme), not a flowbun-owned duplicate log. Replaying a past session's history reconstructs the user's own prompts too, not just the assistant's replies — live streaming never echoes a user's own text back as an event (the browser already renders its own optimistic bubble for what it just sent), so replay opts into a `user.text` event `translateSdkMessage` otherwise never emits. Switching sessions is global, not per-tab, consistent with the paragraph above: every connected tab sees the same conversation, kept in sync by a `chat.historyReset` broadcast the moment the coordinator's current session changes.
+
+Assistant replies render as markdown (`react-markdown` + `remark-gfm`, deliberately with no raw-HTML plugin enabled — safe by default against a reply that happens to echo back HTML-looking content, e.g. an HA entity's `friendly_name`, with no extra sanitization work needed). Each `chat.send` also carries the wiring file the sending tab currently has open in the canvas, if any; the coordinator folds that into just that turn's system prompt — never persisted as part of the conversation, since it reflects whatever the sending tab happens to be looking at right now — so the agent can resolve an ambiguous "this flow"/"it" without asking which one the user means.
 
 ### A second package-export subpath, because the browser can't import `bun:sqlite`
 
@@ -175,7 +185,7 @@ cp spikes/s3-da-hass/.env .env   # or your own HASS_BASE_URL / HASS_TOKEN
 bun run demo:hallway
 ```
 
-This discovers the blocks in `data/blocks/`, validates and typechecks every flow in `data/wiring/`, then runs both example flows in-process: `outdoor_temp_demo` (a real, Zod-validated fetch to a public weather API) and `hallway_lights` (a real, read-only subscription to a Home Assistant motion sensor, feeding `debounce → presence_logic → @hass/action`, with the final light command logged in dry-run rather than executed). Set `FLOWBUN_DEMO_WINDOW_MS` to change how long it listens (default 2 minutes; `0` runs until Ctrl-C), and `FLOWBUN_DRY_RUN=false` if you're ready to let it make real service calls.
+This discovers the blocks in `data/blocks/`, validates and typechecks every flow in `data/wiring/`, then looks for two specific example flows by name to run in-process: `outdoor_temp_demo` (a real, Zod-validated fetch to a public weather API) and `hallway_lights` (a real, read-only subscription to a Home Assistant motion sensor, feeding `debounce → presence_logic → @hass/action`, with the final light command logged in dry-run rather than executed). **Both have since been superseded by real automations** (see below) and no longer exist in `data/wiring/` — the lookup is guarded, so `demo:hallway` still runs and typechecks cleanly, it just has nothing left to actually demo. It's kept for what it still proves about the headless in-process topology from Phase 1, not as the primary way to see the system running; `bun run coordinator` (next) is that. Set `FLOWBUN_DEMO_WINDOW_MS` to change how long it listens (default 2 minutes; `0` runs until Ctrl-C), and `FLOWBUN_DRY_RUN=false` if you're ready to let it make real service calls.
 
 For the real distributed topology instead of the single-process demo:
 
@@ -183,7 +193,7 @@ For the real distributed topology instead of the single-process demo:
 bun run coordinator
 ```
 
-This runs the typecheck gate once up front, then spawns one flow-host child process per file in `data/wiring/` (currently `hallway_lights`, `outdoor_temp_demo`, and `flowbun_test` — a small dedicated flow proving a real, non-dry-run HA write via `input_text.flowbun_test` → `input_boolean.flowbun_test`), each with its own Worker per block. Saving a file under `data/blocks/` or `data/wiring/` triggers a debounced reload; `kill -9`-ing a flow-host's pid demonstrates the crash-recovery path. `Ctrl-C` (or a plain `kill`/`pkill`) shuts everything down cleanly, including every child. The coordinator also opens a websocket control API on port `8787` (`FLOWBUN_WS_PORT`) as soon as it's up.
+This runs the typecheck gate once up front, then spawns one flow-host child process per file in `data/wiring/`, each with its own Worker per block — currently: `battery_controller` (a real, live grid-zero export controller translated from an existing Home Assistant YAML automation, kept as a comment at the bottom of `data/blocks/battery_controller.ts` for comparison), `blinds_sun_tracker` (a real, live automation closing an east-facing window's blinds before sunrise on forecast-hot days and progressively reopening them as the sun's azimuth sweeps past the window — tracking `sun.sun` via `@core/scheduler` + `@hass/read` rather than a single coarse `@hass/trigger`), and `flowbun_test` (a small dedicated flow proving a real, non-dry-run HA write via `input_text.flowbun_test` → `input_boolean.flowbun_test`). Saving a file under `data/blocks/` or `data/wiring/` triggers a debounced reload; `kill -9`-ing a flow-host's pid demonstrates the crash-recovery path. `Ctrl-C` (or a plain `kill`/`pkill`) shuts everything down cleanly, including every child. The coordinator also opens a websocket control API on port `8787` (`FLOWBUN_WS_PORT`) as soon as it's up.
 
 For the browser editor, alongside the coordinator:
 
@@ -215,6 +225,8 @@ docker run -d --name flowbun-demo \
 ```
 
 Then open `http://<host>:4200` — including from another machine on the LAN, since the `/config.json` host-derivation described above means the published port just works without extra configuration. `FLOWBUN_DRY_RUN=true` is the image's baked-in default, so a container started with no other configuration can never make a real Home Assistant write.
+
+Equivalently, the repo's own `docker-compose.yml` already wires up the same ports/bind-mount/`.env` — `docker compose up -d --build` builds and runs it in one step, and is the path this repo's own deployment actually uses. A `docker-compose.yml`-launched container is still just named `flowbun-demo` with the same image tag, so every other command in this README (`docker exec flowbun-demo ...`, the Claude Code auth script below) works the same regardless of which of the two you used to start it.
 
 ## Setting up the Claude Code agent (optional)
 
