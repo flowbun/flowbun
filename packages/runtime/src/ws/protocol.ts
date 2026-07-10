@@ -119,6 +119,47 @@ export interface SystemStats {
   };
 }
 
+/**
+ * One step of a streamed agent reply — see coordinator's agent/events.ts,
+ * which translates the Claude Agent SDK's own message stream into this
+ * small, purpose-built set (not a passthrough of the SDK's ~35-member
+ * message union, which the browser has no business knowing about).
+ * `turnId` is the originating "chat.send" request's requestId, repurposed
+ * as a grouping key (not a resolve-key, since these arrive as broadcasts,
+ * not a response) so the client can fold a whole streamed reply into one
+ * growing message-turn.
+ */
+export type ChatEvent =
+  | { kind: "turn.started"; turnId: string; at: number }
+  | { kind: "assistant.text"; turnId: string; text: string }
+  | {
+      kind: "tool.started";
+      turnId: string;
+      toolCallId: string;
+      summary: string;
+    }
+  | {
+      kind: "tool.finished";
+      turnId: string;
+      toolCallId: string;
+      ok: boolean;
+      summary?: string;
+      error?: string;
+    }
+  | {
+      kind: "turn.done";
+      turnId: string;
+      ok: boolean;
+      costUsd?: number;
+      durationMs?: number;
+    }
+  | {
+      kind: "turn.error";
+      turnId: string;
+      reason: "not_authenticated" | "max_turns" | "other";
+      message: string;
+    };
+
 /** Result of running one arbitrary SQL statement typed into the log
  * panel's "DB" tab (see coordinator/src/db-repl.ts). `columns`/`rows` are
  * empty for a statement that doesn't produce a result set (CREATE/INSERT/
@@ -201,7 +242,8 @@ export type ClientToServer =
       kind: "wiring" | "block";
       file: string;
       hash: string;
-    };
+    }
+  | { type: "chat.send"; requestId: string; text: string };
 
 // ---------- coordinator -> browser ----------
 export type ServerToClient =
@@ -210,6 +252,7 @@ export type ServerToClient =
       flows: FlowEntry[];
       palette: BlockPaletteEntry[];
       logs: LogRecord[];
+      chatEvents: ChatEvent[];
     }
   | { type: "flow.updated"; file: string; wiring: Wiring; undo: UndoStatus }
   | { type: "flow.status"; flow: string; status: FlowStatus }
@@ -347,4 +390,7 @@ export type ServerToClient =
       requestId: string;
       ok: false;
       error: string;
-    };
+    }
+  | { type: "chat.sendResult"; requestId: string; ok: true }
+  | { type: "chat.sendResult"; requestId: string; ok: false; error: string }
+  | { type: "chat.event"; event: ChatEvent };

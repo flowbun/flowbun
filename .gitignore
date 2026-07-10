@@ -9,5 +9,9 @@ data/generated/
 data/blocks/
 data/wiring/
 data/.gitignore
+# Claude's OAuth credentials + session transcripts — defense in depth
+# alongside data/.gitignore's own "agent/" entry (this outer repo doesn't
+# blanket-ignore data/, so it needs its own explicit line).
+data/agent/
 dist/
 *.log

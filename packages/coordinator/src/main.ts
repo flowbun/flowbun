@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import type { LoadedFlow, Wiring } from "flowbun";
@@ -9,6 +10,8 @@ import {
   runTypecheck,
 } from "flowbun";
 import type { FlowEntry, ServerToClient, TypecheckOutcome } from "flowbun/ws";
+import { createAgentRunner } from "./agent/runner";
+import { ChatEventBuffer } from "./chat-event-buffer";
 import { runReplQuery } from "./db-repl";
 import { formatWithBiome } from "./format-block";
 import { createGitSnapshotter } from "./git-snapshot";
@@ -98,6 +101,7 @@ async function loadAllFlows(
 
 async function main(): Promise<void> {
   const logBuffer = new LogBuffer();
+  const chatEvents = new ChatEventBuffer();
   const haRelay = new HaRelay();
   const flows = new Map<string, FlowEntry>();
   const gitSnapshotter = createGitSnapshotter(DATA_DIR);
@@ -436,11 +440,18 @@ async function main(): Promise<void> {
     await handleWiringFileDeleted(path, `delete flow: ${file}`);
   }
 
-  const wsServer = startWsServer(WS_PORT, {
+  // agent/tools.ts's handlers only need a subset of this object (no
+  // supervisor/logBuffer/chatEvents/gitSnapshotter/getSystemStats/queryDb)
+  // — passing the same object to both createAgentRunner and startWsServer
+  // means the agent's tools and the browser's WS handlers call the exact
+  // same functions, inheriting the same typecheck gate/git commit/undo
+  // tracking, with nothing duplicated.
+  const coordinatorDeps = {
     dataDir: DATA_DIR,
     repoRoot: join(DATA_DIR, ".."),
     supervisor,
     logBuffer,
+    chatEvents,
     flows,
     undoStack,
     gitSnapshotter,
@@ -452,11 +463,29 @@ async function main(): Promise<void> {
     deleteBlock,
     deleteFlow,
     listHassEntities: () => haRelay.listEntities(),
-    markSelfWrite: (path) => recentSelfWrites.set(path, Date.now()),
+    markSelfWrite: (path: string) => recentSelfWrites.set(path, Date.now()),
     getSystemStats: () =>
       collectSystemStats(flows, registry.size, logBuffer.all().length),
-    queryDb: async (sql) => runReplQuery(replDb, sql),
+    queryDb: async (sql: string) => runReplQuery(replDb, sql),
+  };
+
+  // Separate from data/blocks|wiring|state|generated — holds Claude's own
+  // OAuth credentials/session transcripts (CLAUDE_CONFIG_DIR, set in the
+  // Dockerfile) and this coordinator's own session-id pointer. Must exist
+  // before session-store.ts's first write; excluded from the git-snapshot
+  // repo via data/.gitignore's "agent/" entry (these are secrets).
+  const agentDir = join(DATA_DIR, "agent");
+  mkdirSync(agentDir, { recursive: true });
+
+  const agentRunner = createAgentRunner(coordinatorDeps, chatEvents, {
+    claudeConfigDir: Bun.env.CLAUDE_CONFIG_DIR ?? join(agentDir, "claude-home"),
+    sessionFile: join(agentDir, "session.json"),
+    maxTurns: Bun.env.FLOWBUN_AGENT_MAX_TURNS
+      ? Number(Bun.env.FLOWBUN_AGENT_MAX_TURNS)
+      : undefined,
   });
+
+  const wsServer = startWsServer(WS_PORT, { ...coordinatorDeps, agentRunner });
   broadcast = wsServer.broadcast;
   console.log(
     `[coordinator] websocket control API on ws://localhost:${WS_PORT}/ws`,

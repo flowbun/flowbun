@@ -304,6 +304,11 @@ body {
   cursor: default;
 }
 
+.undo-redo-group button.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
 .canvas-area {
   flex: 1;
   min-width: 0;
@@ -568,6 +573,137 @@ body {
 
 .db-repl-input:disabled {
   opacity: 0.6;
+}
+
+/* Right-docked, resizable (see useResizablePane axis:"x") — deliberately a
+   sibling pane inside .app-body, not a modal, since a live chat transcript
+   is meant to sit alongside the canvas, not block it. */
+.chat-panel {
+  position: relative;
+  width: 340px;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Kept mounted at all times (see ChatPanel's `open` prop doc) — closing is
+   purely visual so this tab's own sent-prompt text (never recoverable from
+   the server, see groupChatEvents) survives a close/reopen. */
+.chat-panel.chat-panel-hidden {
+  display: none;
+}
+
+.chat-panel .resize-handle-vertical {
+  left: 0;
+  right: auto;
+}
+
+.chat-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-panel-title {
+  font-weight: 500;
+}
+
+.chat-panel-close {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-entries {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-hint {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.chat-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-bubble {
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-bubble-user {
+  background: var(--accent-dim);
+  align-self: flex-end;
+  max-width: 90%;
+}
+
+.chat-bubble-assistant {
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.chat-bubble-error {
+  background: var(--bg);
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+
+.chat-tool-call {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.chat-tool-call.ok .chat-tool-call-icon {
+  color: var(--success);
+}
+
+.chat-tool-call.error .chat-tool-call-icon {
+  color: var(--error);
+}
+
+.chat-tool-call-error {
+  color: var(--error);
+}
+
+.chat-input {
+  flex-shrink: 0;
+  resize: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 12px;
 }
 
 .block-editor-overlay {
@@ -1205,6 +1341,13 @@ body {
 
   .create-dialog-panel {
     width: 90vw;
+  }
+
+  .chat-panel {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    z-index: 40;
   }
 
   /* Fat-finger mitigation: React Flow's default handle hit area is tiny. */

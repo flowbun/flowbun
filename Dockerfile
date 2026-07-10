@@ -33,5 +33,11 @@ ENV FLOWBUN_DRY_RUN=true
 ENV FLOWBUN_DATA_DIR=/app/data
 ENV FLOWBUN_WS_PORT=8787
 ENV FLOWBUN_EDITOR_PORT=4200
+# Redirects the Claude Agent SDK's credential/session storage (normally
+# ~/.claude, ephemeral in this container) into the bind-mounted data/ dir so
+# a one-time `claude setup-token` login survives image rebuilds. See
+# coordinator's agent/runner.ts and data/.gitignore's "agent/" entry (these
+# are secrets and must never be auto-committed by git-snapshot.ts).
+ENV CLAUDE_CONFIG_DIR=/app/data/agent/claude-home
 
 ENTRYPOINT ["bun", "run", "docker-entrypoint.ts"]

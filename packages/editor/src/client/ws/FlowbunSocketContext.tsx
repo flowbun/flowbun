@@ -1,6 +1,7 @@
 import type { LogRecord } from "flowbun/ipc";
 import type {
   BlockPaletteEntry,
+  ChatEvent,
   ClientToServer,
   FlowEntry,
   ServerToClient,
@@ -35,6 +36,7 @@ interface State {
    * consumer that was unmounted (e.g. a different flow tab was active) just
    * sees the latest state on remount instead of replaying a backlog. */
   activity: Map<string, number>;
+  chatEvents: ChatEvent[];
 }
 
 type Action =
@@ -42,6 +44,7 @@ type Action =
   | { type: "connected"; value: boolean };
 
 const MAX_CLIENT_LOGS = 2000;
+const MAX_CLIENT_CHAT_EVENTS = 1000;
 
 export function lastProcessedKey(flow: string, nodeId: string): string {
   return `${flow}::${nodeId}`;
@@ -116,6 +119,7 @@ function reducer(state: State, action: Action): State {
         logs: msg.logs,
         lastProcessed,
         activity,
+        chatEvents: msg.chatEvents,
       };
     }
     case "flow.updated": {
@@ -144,6 +148,14 @@ function reducer(state: State, action: Action): State {
     }
     case "palette.updated":
       return { ...state, palette: msg.palette };
+    case "chat.event":
+      return {
+        ...state,
+        chatEvents: [
+          ...state.chatEvents.slice(-(MAX_CLIENT_CHAT_EVENTS - 1)),
+          msg.event,
+        ],
+      };
     case "log":
       // Stage 2's hard requirement: unconditional, independent of whether
       // the LogPanel is even mounted.
@@ -188,6 +200,7 @@ export function FlowbunSocketProvider({
     logs: [],
     lastProcessed: new Map<string, number>(),
     activity: new Map<string, number>(),
+    chatEvents: [],
   });
   const wsRef = useRef<WebSocket | null>(null);
   const pending = useRef(new Map<string, (msg: ServerToClient) => void>());

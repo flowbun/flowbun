@@ -153,6 +153,16 @@ The browser editor talks to the coordinator over a single websocket ([`flowbun/w
 
 Saving a wiring edit does **not** regenerate the file from the in-memory object. An early attempt at `JSON.stringify(wiring, null, 2)` reformatted with Biome still failed to reproduce the file's existing mix of inline and expanded objects — Biome preserves whichever bracket style is already on disk, it doesn't compute one from content. Instead, [`wiring-writer.ts`](packages/coordinator/src/wiring-writer.ts) uses [`jsonc-parser`](https://github.com/microsoft/node-jsonc-parser) (the same library VS Code uses to edit your `settings.json`) to patch only the specific JSON path that changed — a no-op produces byte-identical output, a config edit is a single-token replacement, a node deletion removes exactly that node's text. The one accepted limitation: adding a brand-new node or wire re-expands whichever sibling immediately precedes the insertion point (an unavoidable consequence of emitting "prev-prop + comma + new-prop" as one edit) — bounded to one adjacent sibling, never file-wide, and it doesn't affect the common drag/config-edit operations.
 
+### Every write to `data/` is auto-committed to its own dedicated git history
+
+`data/blocks` and `data/wiring` are tracked in a *separate* git repository (`data/.git`, initialized and auto-committed by `packages/coordinator/src/git-snapshot.ts`) — not the main flowbun repo's own history. Every write, from any source (the editor's UI, an external edit the fs-watcher picks up, or the agent below), is staged and committed via one hook (`snapshotting-serializer.ts`) that wraps the same reload path every write already goes through — nothing can add a new write path without inheriting this for free. This is what makes undo/redo durable across a coordinator restart (`undo-stack.ts` derives it from git log, not an in-memory stack that a restart used to wipe) and gives the editor's History panel arbitrary point-in-time restore, always as a new forward commit, never a destructive `git reset`. The split from the main repo's history is deliberate: this is high-frequency, machine-generated edit history, not the deliberate, curated commits a human reviews in a PR.
+
+### An embedded Claude Code agent, with no capability beyond what a human already has
+
+The editor's chat panel talks to a [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) `query()` loop running inside the coordinator process (`packages/coordinator/src/agent/`), given exactly one capability surface: an MCP server (`agent/mcp-server.ts`) whose tools call the *same* `wiring.mutate`/`block.write`/`createFlow`/`createBlock`/etc. functions the browser's websocket handlers already call (`agent/tools.ts`) — every built-in SDK tool (Bash, Read, Write, Edit, WebSearch, ...) is explicitly disabled (`tools: []`). Concretely, this means an agent edit is typechecked, git-committed, and undo-tracked exactly like a human edit, through the exact same code path — not a parallel, less-audited one. It's also why this feature was built *after*, not before, `data/`'s own git history above: the agent's write access is only as safe as the ability to see and revert exactly what it changed.
+
+Sessions are single and coordinator-global, not per-browser-connection — nothing else in this app has a per-user concept (every open tab already shares one `flows` map and one log stream), so the chat transcript is shared the same way. Authentication is a long-lived OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, minted once via `claude setup-token`) passed in through `.env` rather than baked into an image or committed anywhere — see [Setting up the Claude Code agent](#setting-up-the-claude-code-agent-optional) below. Claude's own conversation transcripts and session state still live under `data/agent/` (`CLAUDE_CONFIG_DIR`), the same bind-mounted, persists-across-rebuilds directory `data/blocks`/`data/wiring` do, but explicitly excluded from `data/`'s own git history (`data/.gitignore`), since transcripts can contain anything discussed in chat.
+
 ### A second package-export subpath, because the browser can't import `bun:sqlite`
 
 The editor's client bundle needs `Wiring`/`parsePortRef` types and the `flowbun/ws` protocol types, but importing anything from the main `flowbun` barrel — even a pure function — transitively pulls in `bun:sqlite` and `@digital-alchemy/hass`'s Node-only dependencies, which fail outright in a browser bundle. The fix is `flowbun/wiring`, a separate `package.json` export pointing directly at `wiring/schema.ts` (which depends on nothing but `zod`), so the editor imports `Wiring`/`parsePortRef` from there and the main runtime package stays exactly as Node/Bun-only as it needs to be.
@@ -205,6 +215,24 @@ docker run -d --name flowbun-demo \
 ```
 
 Then open `http://<host>:4200` — including from another machine on the LAN, since the `/config.json` host-derivation described above means the published port just works without extra configuration. `FLOWBUN_DRY_RUN=true` is the image's baked-in default, so a container started with no other configuration can never make a real Home Assistant write.
+
+## Setting up the Claude Code agent (optional)
+
+The editor's chat panel (see [above](#an-embedded-claude-code-agent-with-no-capability-beyond-what-a-human-already-has)) needs a one-time interactive login before it can talk to Claude — this can't be scripted end-to-end since it's a real browser OAuth flow, but `scripts/setup-claude-auth.sh` gets you there and confirms it worked:
+
+```sh
+./scripts/setup-claude-auth.sh
+```
+
+This starts the `flowbun` container if it isn't already running, then runs `claude setup-token` inside it — follow the printed URL to log in with your Claude subscription (Pro/Max/Team/Enterprise). It ends by printing a long-lived OAuth token; copy it into `.env` as:
+
+```
+CLAUDE_CODE_OAUTH_TOKEN=<the token you copied>
+```
+
+then `docker compose up -d` to restart the container so it picks up the new variable (`docker-compose.yml` already loads `.env` via `env_file`). `.env` is git-ignored at the repo root, so the token is never committed — and it's not the `data/` git history either, since that only ever tracks `data/blocks`/`data/wiring`. You only do this once per `.env`, not per deploy.
+
+Without this step, the chat panel still works but responds with a clear "not authenticated yet" message instead of a reply — it never hangs or crashes waiting for credentials that don't exist.
 
 ## Development
 

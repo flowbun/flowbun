@@ -11,6 +11,8 @@ import type {
   ServerToClient,
   TypecheckOutcome,
 } from "flowbun/ws";
+import type { AgentRunner } from "./agent/runner";
+import type { ChatEventBuffer } from "./chat-event-buffer";
 import { formatWithBiome } from "./format-block";
 import type { GitSnapshotter } from "./git-snapshot";
 import type { LogBuffer } from "./log-buffer";
@@ -30,6 +32,8 @@ export interface WsServerDeps {
   repoRoot: string;
   supervisor: Supervisor;
   logBuffer: LogBuffer;
+  chatEvents: ChatEventBuffer;
+  agentRunner: AgentRunner;
   /** Live view of every known wiring file — main.ts owns this Map and keeps
    * it current across reloads; both fs-watcher-triggered and ws-triggered
    * reloads write through it. */
@@ -80,7 +84,7 @@ export function buildPalette(
   }));
 }
 
-function isSafeBlockFilename(file: string): boolean {
+export function isSafeBlockFilename(file: string): boolean {
   return !file.includes("/") && !file.includes("..") && file.endsWith(".ts");
 }
 
@@ -93,6 +97,9 @@ export function startWsServer(port: number, deps: WsServerDeps) {
   }
 
   deps.logBuffer.subscribe((entry) => broadcast({ type: "log", entry }));
+  deps.chatEvents.subscribe((event) =>
+    broadcast({ type: "chat.event", event }),
+  );
 
   const server = Bun.serve({
     port,
@@ -110,6 +117,7 @@ export function startWsServer(port: number, deps: WsServerDeps) {
           flows: [...deps.flows.values()],
           palette: deps.getPalette(),
           logs: deps.logBuffer.all().slice(-500),
+          chatEvents: [...deps.chatEvents.all()],
         };
         ws.send(JSON.stringify(snapshot));
       },
@@ -528,6 +536,37 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 error: String(err),
               });
             }
+            break;
+          }
+          case "chat.send": {
+            if (deps.agentRunner.isBusy()) {
+              reply({
+                type: "chat.sendResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: "agent is still responding to a previous message",
+              });
+              break;
+            }
+            reply({
+              type: "chat.sendResult",
+              requestId: msg.requestId,
+              ok: true,
+            });
+            // Not awaited — the reply above already acknowledged the send;
+            // the actual response streams back as "chat.event" broadcasts
+            // (see agent/runner.ts). sendMessage() itself never rejects, so
+            // this .catch() is defense in depth only.
+            deps.agentRunner
+              .sendMessage(msg.text, msg.requestId)
+              .catch((err) => {
+                deps.chatEvents.push({
+                  kind: "turn.error",
+                  turnId: msg.requestId,
+                  reason: "other",
+                  message: String(err),
+                });
+              });
             break;
           }
         }

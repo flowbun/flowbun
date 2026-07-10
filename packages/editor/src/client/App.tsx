@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MonacoBlockEditor } from "./components/BlockEditor/MonacoBlockEditor";
 import { FlowCanvas } from "./components/Canvas/FlowCanvas";
+import { ChatPanel } from "./components/ChatPanel/ChatPanel";
 import { LogPanel } from "./components/LogPanel/LogPanel";
 import { NewBlockDialog } from "./components/NewBlock/NewBlockDialog";
 import { NewFlowDialog } from "./components/NewFlow/NewFlowDialog";
@@ -51,6 +52,7 @@ function Shell() {
   const [flowDetailFile, setFlowDetailFile] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(!isMobile);
 
   const activeFile = route.file ?? files[0] ?? null;
   const selectedNodeId = route.file ? route.nodeId : null;
@@ -172,6 +174,16 @@ function Shell() {
             aria-label="History"
           >
             🕘
+          </button>
+          <button
+            type="button"
+            className={chatOpen ? "active" : ""}
+            onClick={() => setChatOpen((o) => !o)}
+            title="Chat with Claude"
+            aria-label="Chat with Claude"
+            aria-pressed={chatOpen}
+          >
+            💬
           </button>
         </div>
         {isMobile && (
@@ -298,6 +310,11 @@ function Shell() {
             />
           )}
         </div>
+        <ChatPanel
+          chatEvents={state.chatEvents}
+          open={chatOpen}
+          onClose={() => setChatOpen(false)}
+        />
       </div>
       <LogPanel
         logs={state.logs}
