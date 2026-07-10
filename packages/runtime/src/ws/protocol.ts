@@ -132,6 +132,12 @@ export interface SystemStats {
 export type ChatEvent =
   | { kind: "turn.started"; turnId: string; at: number }
   | { kind: "assistant.text"; turnId: string; text: string }
+  /** Only ever emitted during session-history replay (see coordinator's
+   * agent/transcript.ts) — a live turn's user text is deliberately never
+   * echoed back this way (the browser already renders its own optimistic
+   * bubble from what it just sent), but a resumed session has no other
+   * source for what the user originally asked. */
+  | { kind: "user.text"; turnId: string; text: string }
   | {
       kind: "tool.started";
       turnId: string;
@@ -159,6 +165,18 @@ export type ChatEvent =
       reason: "not_authenticated" | "max_turns" | "other";
       message: string;
     };
+
+/** One entry in the session picker (see coordinator's agent/session-store.ts
+ * `listSessions`) — sourced from the Claude Agent SDK's own on-disk
+ * transcripts, not anything flowbun persists itself. */
+export interface ChatSessionSummary {
+  id: string;
+  /** First captured user prompt, truncated — falls back to `id` for a
+   * session whose transcript has no readable user text yet. */
+  title: string;
+  startedAt: number;
+  lastUsedAt: number;
+}
 
 /** Result of running one arbitrary SQL statement typed into the log
  * panel's "DB" tab (see coordinator/src/db-repl.ts). `columns`/`rows` are
@@ -244,7 +262,20 @@ export type ClientToServer =
       file: string;
       hash: string;
     }
-  | { type: "chat.send"; requestId: string; text: string };
+  | {
+      type: "chat.send";
+      requestId: string;
+      text: string;
+      /** The wiring file the sending tab currently has open in the canvas,
+       * if any — lets the agent resolve an ambiguous "this flow"/"it"
+       * without asking (see coordinator's system-prompt.ts,
+       * buildSystemPromptAppend). Not persisted; just this one turn's
+       * context. */
+      currentFlow?: string;
+    }
+  | { type: "chat.newSession"; requestId: string }
+  | { type: "chat.listSessions"; requestId: string }
+  | { type: "chat.resumeSession"; requestId: string; sessionId: string };
 
 // ---------- coordinator -> browser ----------
 export type ServerToClient =
@@ -396,4 +427,37 @@ export type ServerToClient =
     }
   | { type: "chat.sendResult"; requestId: string; ok: true }
   | { type: "chat.sendResult"; requestId: string; ok: false; error: string }
-  | { type: "chat.event"; event: ChatEvent };
+  | { type: "chat.event"; event: ChatEvent }
+  | { type: "chat.newSessionResult"; requestId: string; ok: true }
+  | {
+      type: "chat.newSessionResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
+  | {
+      type: "chat.sessionsResult";
+      requestId: string;
+      ok: true;
+      sessions: ChatSessionSummary[];
+    }
+  | { type: "chat.sessionsResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "chat.resumeSessionResult";
+      requestId: string;
+      ok: true;
+      sessionId: string;
+    }
+  | {
+      type: "chat.resumeSessionResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
+  /** Unsolicited broadcast (no requestId, same family as "log"/
+   * "palette.updated") — fired whenever the coordinator's current chat
+   * session changes (new or resumed), so every connected tab's view stays
+   * in sync (session switching is global, not per-tab — see
+   * agent/runner.ts). Replaces the client's whole chatEvents state, unlike
+   * "chat.event" which appends one. */
+  | { type: "chat.historyReset"; events: ChatEvent[] };

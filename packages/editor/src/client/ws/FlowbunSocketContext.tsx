@@ -156,6 +156,11 @@ function reducer(state: State, action: Action): State {
           msg.event,
         ],
       };
+    // Wholesale replace, not an append — the coordinator's current chat
+    // session changed (new or resumed; see agent/runner.ts), and this is
+    // global (every tab), mirroring "snapshot"'s own chatEvents seeding.
+    case "chat.historyReset":
+      return { ...state, chatEvents: msg.events };
     case "log":
       // Stage 2's hard requirement: unconditional, independent of whether
       // the LogPanel is even mounted.

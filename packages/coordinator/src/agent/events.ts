@@ -75,6 +75,13 @@ function summarizeToolUse(name: string, input: unknown): string {
 export function translateSdkMessage(
   msg: SDKMessage,
   turnId: string,
+  // Live streaming never passes this — the browser already renders its own
+  // optimistic bubble for what it just sent (see ChatPanel.tsx's sentTextRef
+  // comment), so re-emitting the user's own text would just be a redundant
+  // echo. Session-history replay (transcript.ts) is the one caller that
+  // needs it, since there's no other source for a resumed session's past
+  // prompts.
+  opts?: { includeUserText?: boolean },
 ): ChatEvent[] {
   switch (msg.type) {
     case "assistant": {
@@ -114,6 +121,12 @@ export function translateSdkMessage(
             ok: !result.is_error,
             summary: result.is_error ? undefined : text,
             error: result.is_error ? text : undefined,
+          });
+        } else if (block.type === "text" && opts?.includeUserText) {
+          events.push({
+            kind: "user.text",
+            turnId,
+            text: (block as TextBlock).text,
           });
         }
       }

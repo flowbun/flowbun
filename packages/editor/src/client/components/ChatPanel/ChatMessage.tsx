@@ -1,3 +1,4 @@
+import { ChatMarkdown } from "./ChatMarkdown";
 import type { ChatTurn } from "./groupChatEvents";
 
 export function ChatMessage({ turn }: { turn: ChatTurn }) {
@@ -8,9 +9,12 @@ export function ChatMessage({ turn }: { turn: ChatTurn }) {
       )}
       {turn.segments.map((seg, i) =>
         seg.kind === "text" ? (
-          // biome-ignore lint/suspicious/noArrayIndexKey: segments have no stable id, this is an append-only render of one immutable turn's history
-          <div key={i} className="chat-bubble chat-bubble-assistant">
-            {seg.text}
+          <div
+            // biome-ignore lint/suspicious/noArrayIndexKey: segments have no stable id, this is an append-only render of one immutable turn's history
+            key={i}
+            className="chat-bubble chat-bubble-assistant chat-markdown"
+          >
+            <ChatMarkdown text={seg.text} />
           </div>
         ) : (
           <div

@@ -59,6 +59,13 @@ export function groupChatEvents(
     switch (e.kind) {
       case "turn.started":
         break;
+      case "user.text":
+        // Only ever emitted during session-history replay (see
+        // agent/transcript.ts) — a live turn's userText instead comes from
+        // the sentText fallback above, since the browser already knows
+        // what it just sent.
+        t.userText = e.text;
+        break;
       case "assistant.text":
         t.segments.push({ kind: "text", text: e.text });
         break;

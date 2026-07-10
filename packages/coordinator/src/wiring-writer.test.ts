@@ -1,17 +1,26 @@
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { HALLWAY_LIGHTS_WIRING } from "./wiring-fixtures";
 import { applyMutation, WiringWriteError } from "./wiring-writer";
 
-const FILE = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "data",
-  "wiring",
-  "hallway_lights.json",
-);
+// Own tmpdir fixture, not a real data/wiring/*.json file — this test used
+// to read data/wiring/hallway_lights.json directly and broke the moment
+// that flow was deleted in production. HALLWAY_LIGHTS_WIRING is an exact
+// capture of that file's last committed content (see wiring-fixtures.ts).
+let dir: string;
+let FILE: string;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "flowbun-wiring-writer-test-"));
+  FILE = join(dir, "hallway_lights.json");
+  writeFileSync(FILE, HALLWAY_LIGHTS_WIRING);
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
 
 describe("applyMutation round-trip fidelity", () => {
   test("a node.position edit changes only that node's own text, nothing else in the document", () => {

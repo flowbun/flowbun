@@ -1,19 +1,49 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { ChatEvent, ChatSessionSummary } from "flowbun/ws";
 import type { ChatEventBuffer } from "../chat-event-buffer";
 import { translateSdkMessage } from "./events";
 import { createAgentMcpServer } from "./mcp-server";
-import { readSessionId, writeSessionId } from "./session-store";
-import { AGENT_SYSTEM_PROMPT_APPEND } from "./system-prompt";
+import {
+  clearSessionId,
+  findSessionTranscriptPath,
+  listSessions as listSessionsFromDisk,
+  readSessionId,
+  writeSessionId,
+} from "./session-store";
+import { buildSystemPromptAppend } from "./system-prompt";
 import type { AgentToolDeps } from "./tools";
+import { replaySessionTranscript } from "./transcript";
 
 export interface AgentRunner {
   /** Never throws/rejects — every failure is communicated via a pushed
    * ChatEvent, not a thrown error, so callers never need a try/catch (an
-   * attached `.catch()` at the call site is defense in depth only). */
-  sendMessage(text: string, turnId: string): Promise<void>;
+   * attached `.catch()` at the call site is defense in depth only).
+   * `currentFlow`, if given, is the wiring file the sending browser tab
+   * currently has open in the canvas — folded into this turn's system
+   * prompt (see system-prompt.ts's buildSystemPromptAppend), not persisted
+   * as part of the conversation. */
+  sendMessage(
+    text: string,
+    turnId: string,
+    currentFlow?: string,
+  ): Promise<void>;
   isBusy(): boolean;
+  /** Every session this app has ever had, newest-used first — sourced from
+   * the SDK's own on-disk transcripts (session-store.ts's listSessions). */
+  listSessions(): ChatSessionSummary[];
+  /** Clears the current-session pointer so the *next* sendMessage omits
+   * `resume` entirely and the SDK mints a fresh session id. Rejects while
+   * busy, same guard as sendMessage. */
+  startNewSession(): { ok: boolean; error?: string };
+  /** Points the current-session pointer at an existing session and replays
+   * its transcript for the caller to broadcast. Rejects while busy. */
+  resumeSession(sessionId: string): {
+    ok: boolean;
+    error?: string;
+    events?: ChatEvent[];
+  };
 }
 
 type QueryFn = typeof query;
@@ -46,7 +76,11 @@ export function createAgentRunner(
   let busy = false;
   const mcpServer = createAgentMcpServer(deps);
 
-  async function sendMessage(text: string, turnId: string): Promise<void> {
+  async function sendMessage(
+    text: string,
+    turnId: string,
+    currentFlow?: string,
+  ): Promise<void> {
     if (busy) {
       chatEvents.push({
         kind: "turn.error",
@@ -105,7 +139,7 @@ export function createAgentRunner(
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
-            append: AGENT_SYSTEM_PROMPT_APPEND,
+            append: buildSystemPromptAppend(currentFlow),
           },
           resume: resumeId,
         },
@@ -134,5 +168,57 @@ export function createAgentRunner(
     }
   }
 
-  return { sendMessage, isBusy: () => busy };
+  function listSessions(): ChatSessionSummary[] {
+    return listSessionsFromDisk(opts.claudeConfigDir);
+  }
+
+  function startNewSession(): { ok: boolean; error?: string } {
+    if (busy) {
+      return {
+        ok: false,
+        error: "agent is still responding to a previous message",
+      };
+    }
+    clearSessionId(opts.sessionFile);
+    return { ok: true };
+  }
+
+  function resumeSession(sessionId: string): {
+    ok: boolean;
+    error?: string;
+    events?: ChatEvent[];
+  } {
+    if (busy) {
+      return {
+        ok: false,
+        error: "agent is still responding to a previous message",
+      };
+    }
+    const path = findSessionTranscriptPath(opts.claudeConfigDir, sessionId);
+    if (!path) {
+      return {
+        ok: false,
+        error: `no transcript found for session "${sessionId}"`,
+      };
+    }
+    let events: ChatEvent[];
+    try {
+      events = replaySessionTranscript(readFileSync(path, "utf8"));
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+    // Only the pointer changes here — the next sendMessage resumes this
+    // session. The caller (ws-server.ts) is responsible for pushing
+    // `events` into the shared ChatEventBuffer/broadcast.
+    writeSessionId(opts.sessionFile, sessionId);
+    return { ok: true, events };
+  }
+
+  return {
+    sendMessage,
+    isBusy: () => busy,
+    listSessions,
+    startNewSession,
+    resumeSession,
+  };
 }

@@ -33,3 +33,17 @@ Working habits:
 - Keep replies concise — this is a chat panel next to the visual canvas,
   not a document; the user can see the flow/block you just changed.
 `.trim();
+
+/**
+ * Appends a one-line note about which flow file the user currently has open
+ * in the editor canvas, if any — lets the agent resolve an ambiguous "this
+ * flow"/"it" without asking, and pick the right default target for
+ * flow_read/wiring_mutate. Captured fresh per message (see ws-server.ts's
+ * "chat.send" case), not persisted as part of the conversation: it reflects
+ * whatever the sending browser tab is looking at right now, which can
+ * change from one turn to the next.
+ */
+export function buildSystemPromptAppend(currentFlow?: string): string {
+  if (!currentFlow) return AGENT_SYSTEM_PROMPT_APPEND;
+  return `${AGENT_SYSTEM_PROMPT_APPEND}\n\nThe user currently has the flow file "${currentFlow}" open in the editor. If they refer to "this flow", "it", or don't name a flow explicitly, assume they mean this one.`;
+}

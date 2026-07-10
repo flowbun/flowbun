@@ -14,6 +14,7 @@ import type { ChatEvent } from "flowbun/ws";
 export class ChatEventBuffer {
   private buf: ChatEvent[] = [];
   private listeners = new Set<(event: ChatEvent) => void>();
+  private resetListeners = new Set<(events: readonly ChatEvent[]) => void>();
 
   constructor(private readonly capacity = 500) {}
 
@@ -24,12 +25,31 @@ export class ChatEventBuffer {
     for (const listener of this.listeners) listener(event);
   }
 
+  /** Wholesale replace — used when the coordinator's current chat session
+   * changes (new or resumed session; see agent/runner.ts), not for
+   * incremental turn-by-turn updates (that's push). Fires resetListeners,
+   * not the per-event ones: this is a different kind of change (the whole
+   * visible history moved, not one more event arrived) and gets its own
+   * broadcast type (ws-server.ts's "chat.historyReset"). */
+  replace(events: ChatEvent[]): void {
+    this.buf = events.slice(-this.capacity);
+    for (const listener of this.resetListeners) listener(this.buf);
+  }
+
   subscribe(listener: (event: ChatEvent) => void): void {
     this.listeners.add(listener);
   }
 
   unsubscribe(listener: (event: ChatEvent) => void): void {
     this.listeners.delete(listener);
+  }
+
+  subscribeReset(listener: (events: readonly ChatEvent[]) => void): void {
+    this.resetListeners.add(listener);
+  }
+
+  unsubscribeReset(listener: (events: readonly ChatEvent[]) => void): void {
+    this.resetListeners.delete(listener);
   }
 
   all(): readonly ChatEvent[] {

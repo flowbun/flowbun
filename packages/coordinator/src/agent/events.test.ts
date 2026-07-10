@@ -137,6 +137,51 @@ describe("translateSdkMessage", () => {
     expect(translateSdkMessage(msg, TURN)).toEqual([]);
   });
 
+  test("a user text block is dropped by default (live streaming never re-echoes the user's own prompt)", () => {
+    const events = translateSdkMessage(
+      userMessage([{ type: "text", text: "hello" }]),
+      TURN,
+    );
+    expect(events).toEqual([]);
+  });
+
+  test("a user text block becomes user.text when includeUserText is set (session replay)", () => {
+    const events = translateSdkMessage(
+      userMessage([{ type: "text", text: "What flows exist?" }]),
+      TURN,
+      { includeUserText: true },
+    );
+    expect(events).toEqual([
+      { kind: "user.text", turnId: TURN, text: "What flows exist?" },
+    ]);
+  });
+
+  test("includeUserText still extracts tool_result blocks alongside a text block", () => {
+    const events = translateSdkMessage(
+      userMessage([
+        { type: "text", text: "hi" },
+        {
+          type: "tool_result",
+          tool_use_id: "call-1",
+          content: [{ type: "text", text: "ok" }],
+        },
+      ]),
+      TURN,
+      { includeUserText: true },
+    );
+    expect(events).toEqual([
+      { kind: "user.text", turnId: TURN, text: "hi" },
+      {
+        kind: "tool.finished",
+        turnId: TURN,
+        toolCallId: "call-1",
+        ok: true,
+        summary: "ok",
+        error: undefined,
+      },
+    ]);
+  });
+
   test("successful result becomes turn.done with cost/duration", () => {
     const msg = {
       type: "result",

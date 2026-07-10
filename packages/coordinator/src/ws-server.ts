@@ -100,6 +100,9 @@ export function startWsServer(port: number, deps: WsServerDeps) {
   deps.chatEvents.subscribe((event) =>
     broadcast({ type: "chat.event", event }),
   );
+  deps.chatEvents.subscribeReset((events) =>
+    broadcast({ type: "chat.historyReset", events: [...events] }),
+  );
 
   const server = Bun.serve({
     port,
@@ -576,7 +579,7 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             // (see agent/runner.ts). sendMessage() itself never rejects, so
             // this .catch() is defense in depth only.
             deps.agentRunner
-              .sendMessage(msg.text, msg.requestId)
+              .sendMessage(msg.text, msg.requestId, msg.currentFlow)
               .catch((err) => {
                 deps.chatEvents.push({
                   kind: "turn.error",
@@ -585,6 +588,64 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                   message: String(err),
                 });
               });
+            break;
+          }
+          case "chat.newSession": {
+            const r = deps.agentRunner.startNewSession();
+            if (r.ok) deps.chatEvents.replace([]);
+            reply(
+              r.ok
+                ? {
+                    type: "chat.newSessionResult",
+                    requestId: msg.requestId,
+                    ok: true,
+                  }
+                : {
+                    type: "chat.newSessionResult",
+                    requestId: msg.requestId,
+                    ok: false,
+                    error: r.error ?? "unknown error",
+                  },
+            );
+            break;
+          }
+          case "chat.listSessions": {
+            try {
+              const sessions = deps.agentRunner.listSessions();
+              reply({
+                type: "chat.sessionsResult",
+                requestId: msg.requestId,
+                ok: true,
+                sessions,
+              });
+            } catch (err) {
+              reply({
+                type: "chat.sessionsResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "chat.resumeSession": {
+            const r = deps.agentRunner.resumeSession(msg.sessionId);
+            if (r.ok && r.events) deps.chatEvents.replace(r.events);
+            reply(
+              r.ok
+                ? {
+                    type: "chat.resumeSessionResult",
+                    requestId: msg.requestId,
+                    ok: true,
+                    sessionId: msg.sessionId,
+                  }
+                : {
+                    type: "chat.resumeSessionResult",
+                    requestId: msg.requestId,
+                    ok: false,
+                    error: r.error ?? "unknown error",
+                  },
+            );
             break;
           }
         }

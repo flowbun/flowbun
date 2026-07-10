@@ -9,6 +9,35 @@ import { createAgentRunner } from "./runner";
 import { readSessionId } from "./session-store";
 import type { AgentToolDeps } from "./tools";
 
+function jsonl(records: unknown[]): string {
+  return records.map((r) => JSON.stringify(r)).join("\n");
+}
+
+/** Writes a fake SDK transcript at <claudeConfigDir>/projects/<any>/<id>.jsonl — the on-disk shape session-store.ts's listSessions/findSessionTranscriptPath glob for. */
+function writeFakeTranscript(
+  claudeConfigDir: string,
+  sessionId: string,
+  userText: string,
+): void {
+  const projectDir = join(claudeConfigDir, "projects", "-app-data");
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(projectDir, `${sessionId}.jsonl`),
+    jsonl([
+      {
+        type: "user",
+        promptId: "p1",
+        timestamp: "2026-07-09T17:48:41.865Z",
+        message: { role: "user", content: [{ type: "text", text: userText }] },
+      },
+      {
+        type: "assistant",
+        message: { content: [{ type: "text", text: "reply" }] },
+      },
+    ]),
+  );
+}
+
 const UUID = "11111111-1111-1111-1111-111111111111";
 
 function initMessage(sessionId: string): SDKMessage {
@@ -282,6 +311,37 @@ describe("createAgentRunner", () => {
     expect(calls[1]?.options?.resume).toBe("session-1");
   });
 
+  test("currentFlow, when given, is folded into this turn's system prompt append", async () => {
+    const calls: Array<{
+      options?: { systemPrompt?: { append?: string } };
+    }> = [];
+    const fakeQuery = ((params: (typeof calls)[number]) => {
+      calls.push(params);
+      async function* gen() {
+        yield initMessage("s1");
+        yield resultSuccess("s1");
+      }
+      return gen();
+    }) as unknown as typeof query;
+
+    const runner = createAgentRunner(
+      deps,
+      chatEvents,
+      { claudeConfigDir: authedDir, sessionFile },
+      fakeQuery,
+    );
+
+    await runner.sendMessage("hi", "turn-1");
+    expect(calls[0]?.options?.systemPrompt?.append).not.toContain(
+      "currently has the flow file",
+    );
+
+    await runner.sendMessage("hi again", "turn-2", "hallway_lights.json");
+    expect(calls[1]?.options?.systemPrompt?.append).toContain(
+      '"hallway_lights.json"',
+    );
+  });
+
   test("disables every built-in tool and allows only the flowbun MCP server", async () => {
     const calls: Array<{
       options?: {
@@ -339,5 +399,100 @@ describe("createAgentRunner", () => {
 
     const kinds = chatEvents.all().map((e) => e.kind);
     expect(kinds).toEqual(["turn.started", "assistant.text", "turn.done"]);
+  });
+
+  test("listSessions surfaces transcripts found under claudeConfigDir/projects", () => {
+    writeFakeTranscript(authedDir, "session-a", "hello there");
+    const runner = createAgentRunner(deps, chatEvents, {
+      claudeConfigDir: authedDir,
+      sessionFile,
+    });
+    const sessions = runner.listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      id: "session-a",
+      title: "hello there",
+    });
+  });
+
+  test("startNewSession clears the current-session pointer so the next call omits resume", async () => {
+    const calls: Array<{ options?: { resume?: string } }> = [];
+    const fakeQuery = ((params: { options?: { resume?: string } }) => {
+      calls.push(params);
+      async function* gen() {
+        yield initMessage("session-1");
+        yield resultSuccess("session-1");
+      }
+      return gen();
+    }) as unknown as typeof query;
+
+    const runner = createAgentRunner(
+      deps,
+      chatEvents,
+      { claudeConfigDir: authedDir, sessionFile },
+      fakeQuery,
+    );
+    await runner.sendMessage("first", "turn-1");
+    expect(readSessionId(sessionFile)).toBe("session-1");
+
+    const result = runner.startNewSession();
+    expect(result.ok).toBe(true);
+    expect(readSessionId(sessionFile)).toBeUndefined();
+
+    await runner.sendMessage("second", "turn-2");
+    expect(calls[1]?.options?.resume).toBeUndefined();
+  });
+
+  test("startNewSession rejects while busy", async () => {
+    let resolveGate: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      resolveGate = r;
+    });
+    async function* slowGen() {
+      yield initMessage("session-x");
+      await gate;
+      yield resultSuccess("session-x");
+    }
+    const fakeQuery = (() => slowGen()) as unknown as typeof query;
+    const runner = createAgentRunner(
+      deps,
+      chatEvents,
+      { claudeConfigDir: authedDir, sessionFile },
+      fakeQuery,
+    );
+
+    const promise = runner.sendMessage("hi", "turn-1");
+    const result = runner.startNewSession();
+    expect(result.ok).toBe(false);
+
+    resolveGate();
+    await promise;
+  });
+
+  test("resumeSession points the pointer at the chosen session and replays its transcript", () => {
+    writeFakeTranscript(authedDir, "session-b", "what flows exist?");
+    const runner = createAgentRunner(deps, chatEvents, {
+      claudeConfigDir: authedDir,
+      sessionFile,
+    });
+
+    const result = runner.resumeSession("session-b");
+    expect(result.ok).toBe(true);
+    expect(result.events?.map((e) => e.kind)).toEqual([
+      "user.text",
+      "assistant.text",
+      "turn.done",
+    ]);
+    expect(readSessionId(sessionFile)).toBe("session-b");
+  });
+
+  test("resumeSession fails cleanly for an unknown session id", () => {
+    const runner = createAgentRunner(deps, chatEvents, {
+      claudeConfigDir: authedDir,
+      sessionFile,
+    });
+    const result = runner.resumeSession("does-not-exist");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeTruthy();
   });
 });

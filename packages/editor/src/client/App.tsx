@@ -14,6 +14,7 @@ import { HistoryPanel } from "./components/shared/HistoryPanel";
 import { ResizeHandle } from "./components/shared/ResizeHandle";
 import { SystemStatsModal } from "./components/shared/SystemStatsModal";
 import { useIsMobile } from "./hooks/useIsMobile";
+import { usePersistedState } from "./hooks/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
 import { freshNodeId } from "./lib/freshNodeId";
 import { generateRequestId } from "./lib/requestId";
@@ -52,7 +53,10 @@ function Shell() {
   const [flowDetailFile, setFlowDetailFile] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [chatOpen, setChatOpen] = useState(!isMobile);
+  const [chatOpen, setChatOpen] = usePersistedState(
+    "flowbun.chatPanel.open",
+    !isMobile,
+  );
 
   const activeFile = route.file ?? files[0] ?? null;
   const selectedNodeId = route.file ? route.nodeId : null;
@@ -314,6 +318,7 @@ function Shell() {
           chatEvents={state.chatEvents}
           open={chatOpen}
           onClose={() => setChatOpen(false)}
+          currentFlow={activeFile}
         />
       </div>
       <LogPanel
