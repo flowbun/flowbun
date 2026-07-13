@@ -1,10 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { ChatEvent, ChatSessionSummary } from "flowbun/ws";
-import type { ChatEventBuffer } from "../chat-event-buffer";
+import { hasClaudeCredentials } from "./auth";
 import { translateSdkMessage } from "./events";
-import { createAgentMcpServer } from "./mcp-server";
+import { createAgentMcpServer, type ToolCaller } from "./mcp-server";
 import {
   clearSessionId,
   findSessionTranscriptPath,
@@ -13,7 +12,6 @@ import {
   writeSessionId,
 } from "./session-store";
 import { buildSystemPromptAppend } from "./system-prompt";
-import type { AgentToolDeps } from "./tools";
 import { replaySessionTranscript } from "./transcript";
 
 export interface AgentRunner {
@@ -52,29 +50,40 @@ export interface AgentRunnerOptions {
   /** CLAUDE_CONFIG_DIR — where the SDK's own .credentials.json and session
    * transcripts live. */
   claudeConfigDir: string;
-  /** The coordinator's own tiny "last session id" pointer (session-store.ts),
+  /** ai-host's own tiny "last session id" pointer (session-store.ts),
    * separate from the SDK's own transcript storage. */
   sessionFile: string;
+  /** Pinned and stable across every call in this deployment — the SDK keys
+   * resumable sessions by this exact cwd string, so resume silently fails
+   * to find anything if it ever drifts. */
+  cwd: string;
   maxTurns?: number;
 }
 
 /**
- * Owns the Claude Agent SDK's query() loop for flowbun's single, coordinator-
- * global chat conversation (see the plan's session-model rationale: nothing
- * else in this app has a per-user/per-connection concept, so neither does
- * this). One AgentRunner per coordinator process; `sendMessage` rejects
- * concurrent calls via a synchronously-set busy flag rather than queuing —
- * a message sent while the agent is still replying to a previous one is
- * simply refused, not queued.
+ * Owns the Claude Agent SDK's query() loop for flowbun's single, app-global
+ * chat conversation (nothing else in this app has a per-user/per-connection
+ * concept, so neither does this). One AgentRunner per ai-host process;
+ * `sendMessage` rejects concurrent calls via a synchronously-set busy flag
+ * rather than queuing — a message sent while the agent is still replying to
+ * a previous one is simply refused, not queued. Deliberately separate from
+ * flow-node agent calls (node-agent.ts), which never share this session or
+ * this busy flag — a flow firing an @ai/agent node can't block, or be
+ * blocked by, an interactive chat turn.
  */
 export function createAgentRunner(
-  deps: AgentToolDeps,
-  chatEvents: ChatEventBuffer,
   opts: AgentRunnerOptions,
+  callTool: ToolCaller,
+  onEvent: (event: ChatEvent) => void,
+  onBusyChange: (busy: boolean) => void,
   queryFn: QueryFn = query,
 ): AgentRunner {
   let busy = false;
-  const mcpServer = createAgentMcpServer(deps);
+
+  function setBusy(next: boolean): void {
+    busy = next;
+    onBusyChange(next);
+  }
 
   async function sendMessage(
     text: string,
@@ -82,7 +91,7 @@ export function createAgentRunner(
     currentFlow?: string,
   ): Promise<void> {
     if (busy) {
-      chatEvents.push({
+      onEvent({
         kind: "turn.error",
         turnId,
         reason: "other",
@@ -93,23 +102,10 @@ export function createAgentRunner(
     // Set synchronously, before any await, so a second sendMessage() call
     // arriving before this one's first await point still sees busy=true —
     // race-free under Bun's run-to-completion semantics for sync code.
-    busy = true;
+    setBusy(true);
     try {
-      // Proactive check, not a caught error from query() itself — more
-      // reliable than pattern-matching a thrown message that could change
-      // across SDK versions, and lets us give a precise, actionable
-      // instruction instead of a generic failure. `claude setup-token`
-      // prints a long-lived token for CLAUDE_CODE_OAUTH_TOKEN rather than
-      // writing a credentials file when run non-interactively, so both
-      // paths count as authenticated.
-      const hasCredentialsFile = existsSync(
-        join(opts.claudeConfigDir, ".credentials.json"),
-      );
-      const hasEnvToken = Boolean(
-        Bun.env.CLAUDE_CODE_OAUTH_TOKEN || Bun.env.ANTHROPIC_API_KEY,
-      );
-      if (!hasCredentialsFile && !hasEnvToken) {
-        chatEvents.push({
+      if (!hasClaudeCredentials(opts.claudeConfigDir)) {
+        onEvent({
           kind: "turn.error",
           turnId,
           reason: "not_authenticated",
@@ -119,16 +115,19 @@ export function createAgentRunner(
         return;
       }
 
-      chatEvents.push({ kind: "turn.started", turnId, at: Date.now() });
+      onEvent({ kind: "turn.started", turnId, at: Date.now() });
 
       const resumeId = readSessionId(opts.sessionFile);
+      // A fresh MCP-tool-calling wrapper per turn — cheap (closures over a
+      // stable callTool), and avoids ever reusing one McpServer instance
+      // across two connected query() calls (see mcp-server.ts's own
+      // comment: a shared instance throws "Already connected to a
+      // transport" on the second concurrent use).
+      const mcpServer = createAgentMcpServer(callTool);
       const stream = queryFn({
         prompt: text,
         options: {
-          // Pinned and stable across every call in this deployment — the
-          // SDK keys resumable sessions by this exact cwd string, so
-          // resume silently fails to find anything if it ever drifts.
-          cwd: deps.dataDir,
+          cwd: opts.cwd,
           // Disables every built-in SDK tool (Bash, Read, Write, Edit,
           // WebSearch, ...) — the "flowbun" MCP server below is this
           // agent's entire capability surface.
@@ -148,23 +147,23 @@ export function createAgentRunner(
       for await (const message of stream) {
         if (message.type === "system" && message.subtype === "init") {
           // Persisted as soon as it's first seen, not only at a clean
-          // `result` — so a coordinator crash mid-turn still leaves a
-          // resumable pointer (see the plan's failure-posture section).
+          // `result` — so an ai-host crash mid-turn still leaves a
+          // resumable pointer.
           writeSessionId(opts.sessionFile, message.session_id);
         }
         for (const event of translateSdkMessage(message, turnId)) {
-          chatEvents.push(event);
+          onEvent(event);
         }
       }
     } catch (err) {
-      chatEvents.push({
+      onEvent({
         kind: "turn.error",
         turnId,
         reason: "other",
         message: String(err),
       });
     } finally {
-      busy = false;
+      setBusy(false);
     }
   }
 
@@ -208,8 +207,7 @@ export function createAgentRunner(
       return { ok: false, error: String(err) };
     }
     // Only the pointer changes here — the next sendMessage resumes this
-    // session. The caller (ws-server.ts) is responsible for pushing
-    // `events` into the shared ChatEventBuffer/broadcast.
+    // session. The caller is responsible for broadcasting `events`.
     writeSessionId(opts.sessionFile, sessionId);
     return { ok: true, events };
   }

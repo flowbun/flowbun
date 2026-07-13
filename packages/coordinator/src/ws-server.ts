@@ -11,7 +11,7 @@ import type {
   ServerToClient,
   TypecheckOutcome,
 } from "flowbun/ws";
-import type { AgentRunner } from "./agent/runner";
+import type { AiHostClient } from "./ai-host-client";
 import type { ChatEventBuffer } from "./chat-event-buffer";
 import { formatWithBiome } from "./format-block";
 import type { GitSnapshotter } from "./git-snapshot";
@@ -33,7 +33,7 @@ export interface WsServerDeps {
   supervisor: Supervisor;
   logBuffer: LogBuffer;
   chatEvents: ChatEventBuffer;
-  agentRunner: AgentRunner;
+  aiHostClient: AiHostClient;
   /** Live view of every known wiring file — main.ts owns this Map and keeps
    * it current across reloads; both fs-watcher-triggered and ws-triggered
    * reloads write through it. */
@@ -560,7 +560,7 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             break;
           }
           case "chat.send": {
-            if (deps.agentRunner.isBusy()) {
+            if (deps.aiHostClient.isBusy()) {
               reply({
                 type: "chat.sendResult",
                 requestId: msg.requestId,
@@ -574,24 +574,18 @@ export function startWsServer(port: number, deps: WsServerDeps) {
               requestId: msg.requestId,
               ok: true,
             });
-            // Not awaited — the reply above already acknowledged the send;
-            // the actual response streams back as "chat.event" broadcasts
-            // (see agent/runner.ts). sendMessage() itself never rejects, so
-            // this .catch() is defense in depth only.
-            deps.agentRunner
-              .sendMessage(msg.text, msg.requestId, msg.currentFlow)
-              .catch((err) => {
-                deps.chatEvents.push({
-                  kind: "turn.error",
-                  turnId: msg.requestId,
-                  reason: "other",
-                  message: String(err),
-                });
-              });
+            // Fire-and-forget — the reply above already acknowledged the
+            // send; the actual response streams back as "chat.event"
+            // broadcasts (relayed from ai-host by ai-host-client.ts).
+            deps.aiHostClient.sendChat(
+              msg.text,
+              msg.requestId,
+              msg.currentFlow,
+            );
             break;
           }
           case "chat.newSession": {
-            const r = deps.agentRunner.startNewSession();
+            const r = await deps.aiHostClient.newChatSession();
             if (r.ok) deps.chatEvents.replace([]);
             reply(
               r.ok
@@ -610,26 +604,26 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             break;
           }
           case "chat.listSessions": {
-            try {
-              const sessions = deps.agentRunner.listSessions();
-              reply({
-                type: "chat.sessionsResult",
-                requestId: msg.requestId,
-                ok: true,
-                sessions,
-              });
-            } catch (err) {
-              reply({
-                type: "chat.sessionsResult",
-                requestId: msg.requestId,
-                ok: false,
-                error: String(err),
-              });
-            }
+            const r = await deps.aiHostClient.listChatSessions();
+            reply(
+              r.ok
+                ? {
+                    type: "chat.sessionsResult",
+                    requestId: msg.requestId,
+                    ok: true,
+                    sessions: r.sessions,
+                  }
+                : {
+                    type: "chat.sessionsResult",
+                    requestId: msg.requestId,
+                    ok: false,
+                    error: r.error,
+                  },
+            );
             break;
           }
           case "chat.resumeSession": {
-            const r = deps.agentRunner.resumeSession(msg.sessionId);
+            const r = await deps.aiHostClient.resumeChatSession(msg.sessionId);
             if (r.ok && r.events) deps.chatEvents.replace(r.events);
             reply(
               r.ok

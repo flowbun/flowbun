@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import type { LoadedFlow, Wiring } from "flowbun";
@@ -10,7 +9,8 @@ import {
   runTypecheck,
 } from "flowbun";
 import type { FlowEntry, ServerToClient, TypecheckOutcome } from "flowbun/ws";
-import { createAgentRunner } from "./agent/runner";
+import type { AgentToolDeps } from "./agent/tools";
+import { createAiHostClient } from "./ai-host-client";
 import { ChatEventBuffer } from "./chat-event-buffer";
 import { runReplQuery } from "./db-repl";
 import { formatWithBiome } from "./format-block";
@@ -109,6 +109,42 @@ async function main(): Promise<void> {
   let broadcast: ((msg: ServerToClient) => void) | null = null;
   const recentSelfWrites = new Map<string, number>(); // absolute wiring/block file path -> Date.now()
 
+  // Built before `registry` is even assigned below — every function this
+  // closes over (reloadWiringFile, createFlow, ...) is a hoisted `async
+  // function` declaration, safe to reference before its own textual
+  // definition, and getPalette's closure over `registry` only needs that
+  // binding to exist by the time it's *called*, not now (the same trick
+  // `broadcast` above already relies on). Needed this early because
+  // aiHostClient (below) must exist before Supervisor's own construction —
+  // AgentToolDeps deliberately excludes `supervisor` itself (see its own
+  // doc comment on the interface), so there's no real circularity here,
+  // just this ordering.
+  const agentToolDeps: AgentToolDeps = {
+    dataDir: DATA_DIR,
+    repoRoot: join(DATA_DIR, ".."),
+    flows,
+    undoStack,
+    getPalette: () => buildPalette(DATA_DIR, registry),
+    reloadWiringFile,
+    reloadBlocksAndRestartAll,
+    createFlow,
+    createBlock,
+    deleteBlock,
+    deleteFlow,
+    listHassEntities: () => haRelay.listEntities(),
+    markSelfWrite: (path: string) => recentSelfWrites.set(path, Date.now()),
+  };
+
+  // Spawns the one, app-global ai-host subprocess and owns every Claude
+  // Agent SDK interaction from here on — this coordinator process itself
+  // never touches Claude credentials/sessions directly (see
+  // ai-host-client.ts's own doc comment).
+  const aiHostClient = createAiHostClient({
+    dataDir: DATA_DIR,
+    deps: agentToolDeps,
+    chatEvents,
+  });
+
   // A dedicated, long-lived connection for the log panel's "DB" tab —
   // separate from the transient ones loadAllFlows() opens/closes just to
   // build LoadedFlow shapes. Safe to hold open for the coordinator's whole
@@ -127,6 +163,7 @@ async function main(): Promise<void> {
     DATA_DIR,
     haRelay,
     logBuffer,
+    aiHostClient,
     (flow, status) => {
       for (const entry of flows.values()) {
         if (entry.wiring.name === flow) entry.status = status;
@@ -440,52 +477,24 @@ async function main(): Promise<void> {
     await handleWiringFileDeleted(path, `delete flow: ${file}`);
   }
 
-  // agent/tools.ts's handlers only need a subset of this object (no
-  // supervisor/logBuffer/chatEvents/gitSnapshotter/getSystemStats/queryDb)
-  // — passing the same object to both createAgentRunner and startWsServer
-  // means the agent's tools and the browser's WS handlers call the exact
-  // same functions, inheriting the same typecheck gate/git commit/undo
-  // tracking, with nothing duplicated.
+  // agent/tools.ts's handlers only need agentToolDeps's subset of this
+  // object (no supervisor/logBuffer/chatEvents/gitSnapshotter/
+  // getSystemStats/queryDb) — reusing it here means the agent's tools (run
+  // via dispatchToolCall, relayed from ai-host) and the browser's WS
+  // handlers call the exact same functions, inheriting the same typecheck
+  // gate/git commit/undo tracking, with nothing duplicated.
   const coordinatorDeps = {
-    dataDir: DATA_DIR,
-    repoRoot: join(DATA_DIR, ".."),
+    ...agentToolDeps,
     supervisor,
     logBuffer,
     chatEvents,
-    flows,
-    undoStack,
     gitSnapshotter,
-    getPalette: () => buildPalette(DATA_DIR, registry),
-    reloadWiringFile,
-    reloadBlocksAndRestartAll,
-    createFlow,
-    createBlock,
-    deleteBlock,
-    deleteFlow,
-    listHassEntities: () => haRelay.listEntities(),
-    markSelfWrite: (path: string) => recentSelfWrites.set(path, Date.now()),
     getSystemStats: () =>
       collectSystemStats(flows, registry.size, logBuffer.all().length),
     queryDb: async (sql: string) => runReplQuery(replDb, sql),
   };
 
-  // Separate from data/blocks|wiring|state|generated — holds Claude's own
-  // OAuth credentials/session transcripts (CLAUDE_CONFIG_DIR, set in the
-  // Dockerfile) and this coordinator's own session-id pointer. Must exist
-  // before session-store.ts's first write; excluded from the git-snapshot
-  // repo via data/.gitignore's "agent/" entry (these are secrets).
-  const agentDir = join(DATA_DIR, "agent");
-  mkdirSync(agentDir, { recursive: true });
-
-  const agentRunner = createAgentRunner(coordinatorDeps, chatEvents, {
-    claudeConfigDir: Bun.env.CLAUDE_CONFIG_DIR ?? join(agentDir, "claude-home"),
-    sessionFile: join(agentDir, "session.json"),
-    maxTurns: Bun.env.FLOWBUN_AGENT_MAX_TURNS
-      ? Number(Bun.env.FLOWBUN_AGENT_MAX_TURNS)
-      : undefined,
-  });
-
-  const wsServer = startWsServer(WS_PORT, { ...coordinatorDeps, agentRunner });
+  const wsServer = startWsServer(WS_PORT, { ...coordinatorDeps, aiHostClient });
   broadcast = wsServer.broadcast;
   console.log(
     `[coordinator] websocket control API on ws://localhost:${WS_PORT}/ws`,
@@ -567,6 +576,7 @@ async function main(): Promise<void> {
     stopWatcher();
     wsServer.server.stop();
     await supervisor.stopAll();
+    aiHostClient.stop();
     replDb.close();
     process.exit(0);
   }

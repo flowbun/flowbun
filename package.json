@@ -8,6 +8,8 @@
   "scripts": {
     "lint": "biome check .",
     "format": "biome format --write .",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun test",
     "demo:hallway": "bun run packages/runtime/src/demo/run.ts",
     "coordinator": "bun run packages/coordinator/src/main.ts",
     "editor": "bun run packages/editor/src/server.ts",

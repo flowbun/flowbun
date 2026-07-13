@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./ai/agent": "./src/ai/agent.ts",
     "./core/scheduler": "./src/core/scheduler.ts",
     "./core/inject": "./src/core/inject.ts",
     "./core/debug": "./src/core/debug.ts",
@@ -15,6 +16,9 @@
     "./ipc": "./src/ipc/protocol.ts",
     "./ws": "./src/ws/protocol.ts",
     "./wiring": "./src/wiring/schema.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@digital-alchemy/hass": "^26.6.13",

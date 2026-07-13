@@ -1,5 +1,5 @@
 {
-  "name": "coordinator",
+  "name": "ai-host",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,6 @@
     "@anthropic-ai/sdk": "^0.110.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "flowbun": "workspace:*",
-    "jsonc-parser": "^3.3.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

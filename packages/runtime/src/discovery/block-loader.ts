@@ -1,4 +1,5 @@
 import { join, relative } from "node:path";
+import aiAgent from "../ai/agent";
 import type { AnyBlockDef } from "../block";
 import coreDebug from "../core/debug";
 import coreInject from "../core/inject";
@@ -59,6 +60,11 @@ export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
     def: coreDebug,
     specifier: "flowbun/core/debug",
     modulePath: "flowbun/core/debug",
+  });
+  registry.set("@ai/agent", {
+    def: aiAgent,
+    specifier: "flowbun/ai/agent",
+    modulePath: "flowbun/ai/agent",
   });
 
   const blocksDir = join(dataDir, "blocks");

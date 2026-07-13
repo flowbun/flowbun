@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { FlowStatus } from "flowbun/ws";
+import type { AiHostClient } from "./ai-host-client";
 import type { HaRelay } from "./ha-relay";
 import type { LogBuffer } from "./log-buffer";
 
@@ -44,6 +45,7 @@ export class Supervisor {
     private readonly dataDir: string,
     private readonly haRelay: HaRelay,
     private readonly logBuffer: LogBuffer,
+    private readonly aiHostClient: AiHostClient,
     private readonly onStatusChange?: (
       flow: string,
       status: FlowStatus,
@@ -75,6 +77,12 @@ export class Supervisor {
     // subprocess's `send` lingering in HaRelay forever. A no-op on first
     // boot (nothing subscribed yet).
     this.haRelay.unsubscribeFlow(rt.flowName);
+    // Same reasoning as the haRelay call above, for the other resource a
+    // respawning flow-host might have in-flight work against: an @ai/agent
+    // call whose result nobody will ever receive once this subprocess is
+    // gone shouldn't keep running (and costing real API tokens) in the
+    // background — see ai-host-client.ts's own comment on cancelForFlow.
+    this.aiHostClient.cancelForFlow(rt.flowName);
     const mainPath = join(
       import.meta.dir,
       "..",
@@ -174,6 +182,17 @@ export class Supervisor {
         resolve(msg.ok ? { ok: true } : { ok: false, error: msg.error });
         break;
       }
+      case "agent.call":
+        this.aiHostClient
+          .callAgent(rt.flowName, msg.nodeId, msg.input, msg.config)
+          .then((result) => {
+            subprocess.send({
+              type: "agent.result",
+              requestId: msg.requestId,
+              ...result,
+            } satisfies CoordinatorToFlowHost);
+          });
+        break;
       case "log":
         for (const entry of msg.entries) {
           this.logBuffer.push(entry);
@@ -251,6 +270,11 @@ export class Supervisor {
   private async shutdownCurrent(rt: FlowRuntime): Promise<void> {
     if (!rt.subprocess) return;
     rt.expectingExit = true;
+    // A deliberate restart/stop should abort this flow's in-flight agent
+    // calls immediately, rather than waiting for the flow-host's 3s grace
+    // period (or the call's own timeout) to eventually notice nobody's
+    // listening for the result anymore.
+    this.aiHostClient.cancelForFlow(rt.flowName);
     rt.subprocess.send({ type: "shutdown" } satisfies CoordinatorToFlowHost);
     const exitedInTime = await Promise.race([
       rt.subprocess.exited.then(() => true),

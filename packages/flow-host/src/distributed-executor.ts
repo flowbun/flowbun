@@ -4,11 +4,32 @@ import type {
   NodeExecutionRequest,
   NodeExecutor,
 } from "flowbun";
+import type { AgentConfig } from "flowbun/ai/agent";
 import type { ActionCall, ActionConfig } from "flowbun/hass/action";
 import type { EntityStateReading } from "flowbun/hass/client";
 import type { ReadConfig } from "flowbun/hass/read";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { WorkerManager } from "./worker-manager";
+
+// Real-incident-driven: on 2026-07-10, a malformed Home Assistant response
+// to a service call left the underlying @digital-alchemy/hass promise
+// permanently unsettled — with no timeout here, the flow-host's pending
+// promise for that one action never resolved either, and since Router's
+// delivery queue is strictly sequential (concurrency 1, one delivery
+// awaited at a time), that single hung call froze the *entire* flow for
+// the next 14+ hours: every subsequent trigger kept enqueueing correctly,
+// none of it was ever delivered. WorkerManager.exec() already had this
+// exact protection (WORKER_EXEC_TIMEOUT_MS) for ordinary Worker-executed
+// nodes; @hass/action/@hass/read's IPC relay to the coordinator was the
+// one path that didn't.
+const HASS_CALL_TIMEOUT_MS = 10_000;
+
+// A margin over ai-host's own internal per-call timeout (see
+// packages/ai-host/src/agent/node-agent.ts), not the primary timeout itself
+// — the coordinator's relayed reply normally arrives well before this fires,
+// carrying a specific "timed out after Nms" error. This is only a backstop
+// against total silence (coordinator or ai-host process hung/crashed).
+const AGENT_CALL_TIMEOUT_MARGIN_MS = 15_000;
 
 interface PendingAction {
   resolve: () => void;
@@ -20,19 +41,33 @@ interface PendingRead {
   reject: (e: Error) => void;
 }
 
+interface PendingAgentCall {
+  resolve: (result: {
+    text: string;
+    costUsd: number;
+    durationMs: number;
+    numTurns: number;
+  }) => void;
+  reject: (e: Error) => void;
+}
+
 /**
  * The flow-host's NodeExecutor: ordinary nodes go to a persistent Worker
  * (WorkerManager); @hass/action and @hass/read nodes are relayed to the
  * coordinator over IPC instead of ever calling their process() — the
  * coordinator is the only process holding the real HA connection.
- * @hass/trigger and @core/scheduler nodes never reach execute() at all (no
- * wire can target their empty inputs).
+ * @ai/agent nodes are likewise relayed — the coordinator (and, onward from
+ * there, the dedicated ai-host process) is the only place holding Claude
+ * credentials/session state. @hass/trigger and @core/scheduler nodes never
+ * reach execute() at all (no wire can target their empty inputs).
  */
 export class DistributedExecutor implements NodeExecutor {
   private pendingActions = new Map<number, PendingAction>();
   private nextActionRequestId = 1;
   private pendingReads = new Map<number, PendingRead>();
   private nextReadRequestId = 1;
+  private pendingAgentCalls = new Map<number, PendingAgentCall>();
+  private nextAgentRequestId = 1;
 
   constructor(
     private readonly deps: {
@@ -40,6 +75,12 @@ export class DistributedExecutor implements NodeExecutor {
       workerManager: WorkerManager;
       send: (msg: FlowHostToCoordinator) => void;
       log: Logger;
+      /** Overridable for tests only — production always gets the real
+       * HASS_CALL_TIMEOUT_MS default. */
+      hassCallTimeoutMs?: number;
+      /** Overridable for tests only — production always gets the real
+       * AGENT_CALL_TIMEOUT_MARGIN_MS default. */
+      agentCallTimeoutMarginMs?: number;
     },
   ) {}
 
@@ -58,6 +99,11 @@ export class DistributedExecutor implements NodeExecutor {
     if (node.block.name === "@hass/read") {
       const config = node.config as ReadConfig;
       return this.callHassRead(node.nodeId, config.entity);
+    }
+
+    if (node.block.name === "@ai/agent") {
+      const config = node.config as AgentConfig;
+      return this.callAgent(node.nodeId, config, req.inputs.prompt);
     }
 
     const requestId = this.deps.workerManager.allocRequestId();
@@ -91,10 +137,26 @@ export class DistributedExecutor implements NodeExecutor {
       call: resolved,
       dryRunOverride,
     });
+    const timeoutMs = this.deps.hassCallTimeoutMs ?? HASS_CALL_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingActions.delete(requestId);
+        this.deps.log.error("hass.call_timeout", { node: nodeId });
+        reject(
+          new Error(
+            `@hass/action call to "${nodeId}" timed out after ${timeoutMs}ms`,
+          ),
+        );
+      }, timeoutMs);
       this.pendingActions.set(requestId, {
-        resolve: () => resolve(undefined),
-        reject,
+        resolve: () => {
+          clearTimeout(timer);
+          resolve(undefined);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
       });
     });
   }
@@ -110,12 +172,91 @@ export class DistributedExecutor implements NodeExecutor {
       nodeId,
       entity,
     });
+    const timeoutMs = this.deps.hassCallTimeoutMs ?? HASS_CALL_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingReads.delete(requestId);
+        this.deps.log.error("hass.read_timeout", { node: nodeId, entity });
+        reject(
+          new Error(
+            `@hass/read call to "${nodeId}" timed out after ${timeoutMs}ms`,
+          ),
+        );
+      }, timeoutMs);
       this.pendingReads.set(requestId, {
-        resolve: (reading) => resolve({ result: reading }),
-        reject,
+        resolve: (reading) => {
+          clearTimeout(timer);
+          resolve({ result: reading });
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
       });
     });
+  }
+
+  private callAgent(
+    nodeId: string,
+    config: AgentConfig,
+    input: unknown,
+  ): Promise<Record<string, unknown>> {
+    const requestId = this.nextAgentRequestId++;
+    this.deps.send({
+      type: "agent.call",
+      requestId,
+      nodeId,
+      input,
+      config,
+    });
+    const marginMs =
+      this.deps.agentCallTimeoutMarginMs ?? AGENT_CALL_TIMEOUT_MARGIN_MS;
+    const timeoutMs = config.timeoutMs + marginMs;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingAgentCalls.delete(requestId);
+        this.deps.log.error("agent.call_timeout", { node: nodeId });
+        reject(
+          new Error(
+            `@ai/agent call to "${nodeId}" timed out after ${timeoutMs}ms`,
+          ),
+        );
+      }, timeoutMs);
+      this.pendingAgentCalls.set(requestId, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve({ result });
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+    });
+  }
+
+  handleAgentResult(
+    msg: Extract<CoordinatorToFlowHost, { type: "agent.result" }>,
+  ): void {
+    const pending = this.pendingAgentCalls.get(msg.requestId);
+    if (!pending) return;
+    this.pendingAgentCalls.delete(msg.requestId);
+    if (msg.ok) {
+      this.deps.log.info("agent.call", {
+        costUsd: msg.costUsd,
+        durationMs: msg.durationMs,
+        numTurns: msg.numTurns,
+      });
+      pending.resolve({
+        text: msg.text,
+        costUsd: msg.costUsd,
+        durationMs: msg.durationMs,
+        numTurns: msg.numTurns,
+      });
+    } else {
+      this.deps.log.error("agent.call_failed", { error: msg.error });
+      pending.reject(new Error(msg.error));
+    }
   }
 
   handleReadResult(

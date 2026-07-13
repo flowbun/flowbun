@@ -3,11 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { FlowEntry } from "flowbun/ws";
-import { ChatEventBuffer } from "../chat-event-buffer";
+import type { AgentToolResult } from "flowbun/ipc";
+import type { ChatEvent } from "flowbun/ws";
 import { createAgentRunner } from "./runner";
 import { readSessionId } from "./session-store";
-import type { AgentToolDeps } from "./tools";
 
 function jsonl(records: unknown[]): string {
   return records.map((r) => JSON.stringify(r)).join("\n");
@@ -83,8 +82,14 @@ let dir: string;
 let authedDir: string;
 let unauthedDir: string;
 let sessionFile: string;
-let deps: AgentToolDeps;
-let chatEvents: ChatEventBuffer;
+let events: ChatEvent[];
+let busyHistory: boolean[];
+let onEvent: (event: ChatEvent) => void;
+let onBusyChange: (busy: boolean) => void;
+const noopCallTool = async (): Promise<AgentToolResult> => ({
+  ok: false,
+  summary: "not exercised in this test",
+});
 
 let savedOauthToken: string | undefined;
 let savedApiKey: string | undefined;
@@ -106,27 +111,10 @@ beforeEach(() => {
   writeFileSync(join(authedDir, ".credentials.json"), "{}");
   sessionFile = join(dir, "session.json");
 
-  chatEvents = new ChatEventBuffer();
-  deps = {
-    dataDir: dir,
-    repoRoot: dir,
-    flows: new Map<string, FlowEntry>(),
-    // biome-ignore lint/suspicious/noExplicitAny: not exercised by these tests — no scripted stream calls a tool.
-    undoStack: {} as any,
-    getPalette: () => [],
-    reloadWiringFile: async () => ({ ok: true, output: "" }),
-    reloadBlocksAndRestartAll: async () => ({ ok: true, output: "" }),
-    createFlow: async () => {
-      throw new Error("not exercised in this test");
-    },
-    createBlock: async () => {
-      throw new Error("not exercised in this test");
-    },
-    deleteBlock: async () => {},
-    deleteFlow: async () => {},
-    listHassEntities: async () => [],
-    markSelfWrite: () => {},
-  };
+  events = [];
+  busyHistory = [];
+  onEvent = (e) => events.push(e);
+  onBusyChange = (b) => busyHistory.push(b);
 });
 
 afterEach(() => {
@@ -146,15 +134,15 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: unauthedDir, sessionFile },
+      { claudeConfigDir: unauthedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
     await runner.sendMessage("hello", "turn-1");
 
     expect(called).toBe(false);
-    const events = chatEvents.all();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       kind: "turn.error",
@@ -175,9 +163,10 @@ describe("createAgentRunner", () => {
     }
     const fakeQuery = (() => slowGen()) as unknown as typeof query;
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
 
@@ -187,6 +176,7 @@ describe("createAgentRunner", () => {
     resolveGate();
     await promise;
     expect(runner.isBusy()).toBe(false);
+    expect(busyHistory).toEqual([true, false]);
   });
 
   test("a second call while busy is rejected immediately with its own turn.error, without invoking queryFn again", async () => {
@@ -203,16 +193,17 @@ describe("createAgentRunner", () => {
     }
     const fakeQuery = (() => slowGen()) as unknown as typeof query;
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
 
     const first = runner.sendMessage("hi", "turn-1");
     await runner.sendMessage("hi again", "turn-2");
     expect(callCount).toBe(1);
-    const turn2Events = chatEvents.all().filter((e) => e.turnId === "turn-2");
+    const turn2Events = events.filter((e) => e.turnId === "turn-2");
     expect(turn2Events).toHaveLength(1);
     expect(turn2Events[0]).toMatchObject({
       kind: "turn.error",
@@ -230,16 +221,16 @@ describe("createAgentRunner", () => {
     }
     const fakeQuery = (() => gen()) as unknown as typeof query;
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
 
     await runner.sendMessage("hi", "turn-1");
 
     expect(readSessionId(sessionFile)).toBe("session-abc");
-    const events = chatEvents.all();
     expect(
       events.some((e) => e.kind === "turn.error" && e.reason === "other"),
     ).toBe(true);
@@ -257,9 +248,10 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
     await runner.sendMessage("hi", "turn-1");
@@ -278,9 +270,10 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile, maxTurns: 3 },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir, maxTurns: 3 },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
     await runner.sendMessage("hi", "turn-1");
@@ -299,9 +292,10 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
     await runner.sendMessage("first", "turn-1");
@@ -325,9 +319,10 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
 
@@ -360,9 +355,10 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
     await runner.sendMessage("hi", "turn-1");
@@ -390,23 +386,26 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
     await runner.sendMessage("hi", "turn-1");
 
-    const kinds = chatEvents.all().map((e) => e.kind);
+    const kinds = events.map((e) => e.kind);
     expect(kinds).toEqual(["turn.started", "assistant.text", "turn.done"]);
   });
 
   test("listSessions surfaces transcripts found under claudeConfigDir/projects", () => {
     writeFakeTranscript(authedDir, "session-a", "hello there");
-    const runner = createAgentRunner(deps, chatEvents, {
-      claudeConfigDir: authedDir,
-      sessionFile,
-    });
+    const runner = createAgentRunner(
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
+    );
     const sessions = runner.listSessions();
     expect(sessions).toHaveLength(1);
     expect(sessions[0]).toMatchObject({
@@ -427,9 +426,10 @@ describe("createAgentRunner", () => {
     }) as unknown as typeof query;
 
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
     await runner.sendMessage("first", "turn-1");
@@ -455,9 +455,10 @@ describe("createAgentRunner", () => {
     }
     const fakeQuery = (() => slowGen()) as unknown as typeof query;
     const runner = createAgentRunner(
-      deps,
-      chatEvents,
-      { claudeConfigDir: authedDir, sessionFile },
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
       fakeQuery,
     );
 
@@ -471,10 +472,12 @@ describe("createAgentRunner", () => {
 
   test("resumeSession points the pointer at the chosen session and replays its transcript", () => {
     writeFakeTranscript(authedDir, "session-b", "what flows exist?");
-    const runner = createAgentRunner(deps, chatEvents, {
-      claudeConfigDir: authedDir,
-      sessionFile,
-    });
+    const runner = createAgentRunner(
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
+    );
 
     const result = runner.resumeSession("session-b");
     expect(result.ok).toBe(true);
@@ -487,10 +490,12 @@ describe("createAgentRunner", () => {
   });
 
   test("resumeSession fails cleanly for an unknown session id", () => {
-    const runner = createAgentRunner(deps, chatEvents, {
-      claudeConfigDir: authedDir,
-      sessionFile,
-    });
+    const runner = createAgentRunner(
+      { claudeConfigDir: authedDir, sessionFile, cwd: dir },
+      noopCallTool,
+      onEvent,
+      onBusyChange,
+    );
     const result = runner.resumeSession("does-not-exist");
     expect(result.ok).toBe(false);
     expect(result.error).toBeTruthy();

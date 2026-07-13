@@ -43,7 +43,12 @@ export class WorkerManager {
     const dbPath = join(this.dataDir, "state", "flowbun.sqlite");
     await Promise.all(
       [...this.flow.nodes]
-        .filter(([, n]) => !n.block.name.startsWith("@hass/") && !n.disabled)
+        .filter(
+          ([, n]) =>
+            !n.block.name.startsWith("@hass/") &&
+            n.block.name !== "@ai/agent" &&
+            !n.disabled,
+        )
         .map(([nodeId, node]) => this.spawn(nodeId, node, dbPath)),
     );
   }

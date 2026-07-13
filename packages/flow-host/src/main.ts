@@ -81,6 +81,8 @@ async function main(): Promise<void> {
       (executor as DistributedExecutor).handleActionResult(msg);
     } else if (msg.type === "hass.read.result") {
       (executor as DistributedExecutor).handleReadResult(msg);
+    } else if (msg.type === "agent.result") {
+      (executor as DistributedExecutor).handleAgentResult(msg);
     } else if (msg.type === "flow.fireNode") {
       const node = flow.nodes.get(msg.nodeId);
       if (!node) {
