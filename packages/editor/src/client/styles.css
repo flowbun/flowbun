@@ -920,11 +920,17 @@ body {
 }
 
 .block-editor-panel {
+  position: relative;
   width: min(720px, 90vw);
   background: var(--bg-elevated);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+}
+
+.block-editor-panel .resize-handle-vertical {
+  left: 0;
+  right: auto;
 }
 
 .block-editor-header {

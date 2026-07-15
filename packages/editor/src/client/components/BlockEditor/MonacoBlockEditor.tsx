@@ -2,10 +2,15 @@ import Editor, { type BeforeMount, type OnMount } from "@monaco-editor/react";
 import type { TypecheckOutcome, UndoStatus } from "flowbun/ws";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIsMobile } from "../../hooks/useIsMobile";
+import { useResizablePane } from "../../hooks/useResizablePane";
 import { FLOWBUN_AMBIENT_TYPES } from "../../lib/flowbunAmbientTypes";
 import { generateRequestId } from "../../lib/requestId";
 import { useFlowbunSocket } from "../../ws/FlowbunSocketContext";
 import { HistoryPanel } from "../shared/HistoryPanel";
+import { ResizeHandle } from "../shared/ResizeHandle";
+
+const MIN_WIDTH = 400;
+const MAX_WIDTH = 1400;
 
 // Monaco's TS worker is a singleton shared across every MonacoBlockEditor
 // mount (opening block A, closing it, opening block B all reuse the same
@@ -42,6 +47,13 @@ export function MonacoBlockEditor({
 }) {
   const { send } = useFlowbunSocket();
   const isMobile = useIsMobile();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const pane = useResizablePane("flowbun.blockEditorWidth", panelRef, {
+    axis: "x",
+    min: MIN_WIDTH,
+    max: MAX_WIDTH,
+    invert: true,
+  });
   const [source, setSource] = useState<string | null>(null);
   const [typecheck, setTypecheck] = useState<TypecheckOutcome | null>(null);
   const [saving, setSaving] = useState(false);
@@ -141,7 +153,22 @@ export function MonacoBlockEditor({
       aria-modal="true"
       aria-label={`Edit ${file}`}
     >
-      <div className="block-editor-panel">
+      <div
+        ref={panelRef}
+        className="block-editor-panel"
+        style={
+          !isMobile && pane.size !== undefined
+            ? { width: pane.size }
+            : undefined
+        }
+      >
+        {!isMobile && (
+          <ResizeHandle
+            orientation="vertical"
+            pane={pane}
+            label="Resize block editor"
+          />
+        )}
         <div className="block-editor-header">
           <strong>{file}</strong>
           <div className="block-editor-actions">
@@ -194,6 +221,21 @@ export function MonacoBlockEditor({
             value={source ?? ""}
             beforeMount={registerFlowbunTypes}
             onMount={handleMount}
+            // Without this, closing the panel synchronously disposes the
+            // text model (@monaco-editor/react's default unmount
+            // behavior). Monaco's TS worker runs semantic-diagnostics
+            // validation on the model asynchronously (independent of
+            // onValidate being wired up), and if that resolves after the
+            // model is gone, it throws from inside the CDN-loaded,
+            // cross-origin Monaco bundle — which the browser reports with
+            // no stack as a bare, persistent "Script error." Keeping the
+            // model alive (only the editor widget itself gets disposed)
+            // means that in-flight worker callback still has something
+            // valid to apply markers to. Trade-off: models for every
+            // block ever opened this session stay in memory rather than
+            // being freed on close — acceptable here given how few
+            // distinct block files a flowbun instance actually has.
+            keepCurrentModel
             options={{
               automaticLayout: true,
               wordWrap: "on",
