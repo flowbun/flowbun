@@ -15,7 +15,6 @@ import { ChatEventBuffer } from "./chat-event-buffer";
 import { runReplQuery } from "./db-repl";
 import { formatWithBiome } from "./format-block";
 import { createGitSnapshotter } from "./git-snapshot";
-import { HaRelay } from "./ha-relay";
 import { LogBuffer } from "./log-buffer";
 import { createReloadSerializer } from "./serialize-reload";
 import { createSnapshottingSerializer } from "./snapshotting-serializer";
@@ -102,23 +101,22 @@ async function loadAllFlows(
 async function main(): Promise<void> {
   const logBuffer = new LogBuffer();
   const chatEvents = new ChatEventBuffer();
-  const haRelay = new HaRelay();
   const flows = new Map<string, FlowEntry>();
   const gitSnapshotter = createGitSnapshotter(DATA_DIR);
   const undoStack = new UndoStack(gitSnapshotter);
   let broadcast: ((msg: ServerToClient) => void) | null = null;
   const recentSelfWrites = new Map<string, number>(); // absolute wiring/block file path -> Date.now()
 
-  // Built before `registry` is even assigned below — every function this
-  // closes over (reloadWiringFile, createFlow, ...) is a hoisted `async
-  // function` declaration, safe to reference before its own textual
-  // definition, and getPalette's closure over `registry` only needs that
-  // binding to exist by the time it's *called*, not now (the same trick
-  // `broadcast` above already relies on). Needed this early because
-  // aiHostClient (below) must exist before Supervisor's own construction —
-  // AgentToolDeps deliberately excludes `supervisor` itself (see its own
-  // doc comment on the interface), so there's no real circularity here,
-  // just this ordering.
+  // Built before `registry` (and `supervisor`) are even assigned below —
+  // every function this closes over (reloadWiringFile, createFlow, ...) is
+  // a hoisted `async function` declaration, safe to reference before its
+  // own textual definition, and getPalette's/listHassEntities' closures
+  // over `registry`/`supervisor` only need those bindings to exist by the
+  // time they're *called*, not now (the same trick `broadcast` above
+  // already relies on). Needed this early because aiHostClient (below) must
+  // exist before Supervisor's own construction — AgentToolDeps deliberately
+  // excludes `supervisor` itself as a field (see its own doc comment on the
+  // interface), so there's no real circularity here, just this ordering.
   const agentToolDeps: AgentToolDeps = {
     dataDir: DATA_DIR,
     repoRoot: join(DATA_DIR, ".."),
@@ -131,7 +129,9 @@ async function main(): Promise<void> {
     createBlock,
     deleteBlock,
     deleteFlow,
-    listHassEntities: () => haRelay.listEntities(),
+    // This coordinator holds no HA connection of its own anymore (see
+    // hass/client.ts) — relayed to whichever flow-host is running instead.
+    listHassEntities: () => supervisor.queryHassEntities(),
     markSelfWrite: (path: string) => recentSelfWrites.set(path, Date.now()),
   };
 
@@ -161,7 +161,6 @@ async function main(): Promise<void> {
 
   const supervisor = new Supervisor(
     DATA_DIR,
-    haRelay,
     logBuffer,
     aiHostClient,
     (flow, status) => {

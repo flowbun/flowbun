@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import type { AgentConfig } from "flowbun/ai/agent";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { AgentCallResult, AiHostClient } from "./ai-host-client";
-import type { HaRelay } from "./ha-relay";
 import { LogBuffer } from "./log-buffer";
 import { Supervisor } from "./supervisor";
 
@@ -41,11 +40,6 @@ function fakeAiHostClient(callAgentResult: AgentCallResult): AiHostClient & {
   };
 }
 
-const noopHaRelay = {
-  unsubscribeFlow: () => {},
-  // biome-ignore lint/suspicious/noExplicitAny: not exercised by these tests
-} as any as HaRelay;
-
 /** onMessage() is private — reaching it directly (rather than driving it
  * through a real spawned flow-host subprocess) mirrors
  * distributed-executor.test.ts's own use of `as any` to construct minimal
@@ -71,7 +65,6 @@ describe("Supervisor agent.call dispatch", () => {
     });
     const supervisor = new Supervisor(
       "/tmp/does-not-matter",
-      noopHaRelay,
       new LogBuffer(),
       aiHostClient,
     );
@@ -112,7 +105,6 @@ describe("Supervisor agent.call dispatch", () => {
     });
     const supervisor = new Supervisor(
       "/tmp/does-not-matter",
-      noopHaRelay,
       new LogBuffer(),
       aiHostClient,
     );

@@ -1,8 +1,7 @@
 import { join } from "node:path";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
-import type { FlowStatus } from "flowbun/ws";
+import type { FlowStatus, HassEntitySummary } from "flowbun/ws";
 import type { AiHostClient } from "./ai-host-client";
-import type { HaRelay } from "./ha-relay";
 import type { LogBuffer } from "./log-buffer";
 
 const BACKOFF_BASE_MS = 500;
@@ -40,10 +39,22 @@ export class Supervisor {
     (result: { ok: boolean; error?: string }) => void
   >();
   private nextFireRequestId = 1;
+  // Coordinator-initiated, same shape as pendingFires — this coordinator
+  // holds no HA connection of its own (see hass/client.ts), so answering
+  // "what entities exist" means asking whichever flow-host happens to be
+  // running (see queryHassEntities()).
+  private pendingEntityQueries = new Map<
+    number,
+    (
+      result:
+        | { ok: true; entities: HassEntitySummary[] }
+        | { ok: false; error: string },
+    ) => void
+  >();
+  private nextEntityQueryRequestId = 1;
 
   constructor(
     private readonly dataDir: string,
-    private readonly haRelay: HaRelay,
     private readonly logBuffer: LogBuffer,
     private readonly aiHostClient: AiHostClient,
     private readonly onStatusChange?: (
@@ -67,21 +78,14 @@ export class Supervisor {
   }
 
   private spawn(rt: FlowRuntime): void {
-    // Clears any listener left behind by a previous incarnation of this
-    // flow (crashed or deliberately restarted) before the new process
-    // re-subscribes. Every trigger node used to always re-subscribe on
-    // restart, so a stale listener was harmlessly overwritten by the same
-    // flowName::nodeId key — that stopped being guaranteed once a trigger
-    // node can be disabled (the new flow-host just won't re-subscribe it),
-    // which would otherwise leave a listener closed over a dead
-    // subprocess's `send` lingering in HaRelay forever. A no-op on first
-    // boot (nothing subscribed yet).
-    this.haRelay.unsubscribeFlow(rt.flowName);
-    // Same reasoning as the haRelay call above, for the other resource a
-    // respawning flow-host might have in-flight work against: an @ai/agent
-    // call whose result nobody will ever receive once this subprocess is
-    // gone shouldn't keep running (and costing real API tokens) in the
-    // background — see ai-host-client.ts's own comment on cancelForFlow.
+    // A respawning flow-host might have in-flight work whose result nobody
+    // will ever receive once this subprocess is gone — an @ai/agent call
+    // shouldn't keep running (and costing real API tokens) in the
+    // background. A no-op on first boot (nothing in flight yet). See
+    // ai-host-client.ts's own comment on cancelForFlow. (Each flow-host's
+    // own HA connection/subscriptions — see hass/client.ts — die with its
+    // process and get re-established fresh by the new one; there's no
+    // coordinator-side listener bookkeeping to clear anymore.)
     this.aiHostClient.cancelForFlow(rt.flowName);
     const mainPath = join(
       import.meta.dir,
@@ -119,62 +123,17 @@ export class Supervisor {
           since: Date.now(),
         });
         break;
-      case "hass.subscribe":
-        this.haRelay.subscribe(
-          rt.flowName,
-          msg.nodeId,
-          msg.entity,
-          (payload) => {
-            subprocess.send({
-              type: "hass.event",
-              nodeId: msg.nodeId,
-              port: "changed",
-              payload,
-            } satisfies CoordinatorToFlowHost);
-          },
+      case "hass.entities.result": {
+        const resolve = this.pendingEntityQueries.get(msg.requestId);
+        if (!resolve) break;
+        this.pendingEntityQueries.delete(msg.requestId);
+        resolve(
+          msg.ok
+            ? { ok: true, entities: msg.entities }
+            : { ok: false, error: msg.error },
         );
         break;
-      case "hass.action.call":
-        this.haRelay.call(msg.call, msg.dryRunOverride).then(
-          ({ dryRun }) => {
-            subprocess.send({
-              type: "hass.action.result",
-              requestId: msg.requestId,
-              ok: true,
-              dryRun,
-            } satisfies CoordinatorToFlowHost);
-          },
-          (err) => {
-            subprocess.send({
-              type: "hass.action.result",
-              requestId: msg.requestId,
-              ok: false,
-              error: String(err),
-              dryRun: msg.dryRunOverride ?? false,
-            } satisfies CoordinatorToFlowHost);
-          },
-        );
-        break;
-      case "hass.read.call":
-        this.haRelay.read(msg.entity).then(
-          (reading) => {
-            subprocess.send({
-              type: "hass.read.result",
-              requestId: msg.requestId,
-              ok: true,
-              reading,
-            } satisfies CoordinatorToFlowHost);
-          },
-          (err) => {
-            subprocess.send({
-              type: "hass.read.result",
-              requestId: msg.requestId,
-              ok: false,
-              error: String(err),
-            } satisfies CoordinatorToFlowHost);
-          },
-        );
-        break;
+      }
       case "flow.fireNode.result": {
         const resolve = this.pendingFires.get(msg.requestId);
         if (!resolve) break;
@@ -290,7 +249,7 @@ export class Supervisor {
     rt.crashTimestamps = []; // a deliberate, successful reload earns a fresh crash-loop window
     await this.shutdownCurrent(rt);
     this.setStatus(rt, { kind: "starting" });
-    this.spawn(rt); // also clears stale HA listeners from the old process — see spawn()'s own comment
+    this.spawn(rt);
   }
 
   /** Stops a flow's subprocess and forgets it entirely (unlike restartFlow,
@@ -299,7 +258,6 @@ export class Supervisor {
     const rt = this.flows.get(flowName);
     if (!rt) return;
     await this.shutdownCurrent(rt);
-    this.haRelay.unsubscribeFlow(rt.flowName);
     this.flows.delete(flowName);
   }
 
@@ -323,6 +281,31 @@ export class Supervisor {
     } satisfies CoordinatorToFlowHost);
     return new Promise((resolve) => {
       this.pendingFires.set(requestId, resolve);
+    });
+  }
+
+  /** Asks whichever flow-host happens to be running to answer "what HA
+   * entities exist" — this coordinator holds no HA connection of its own
+   * (see hass/client.ts, and worker-manager.ts's own doc comment on why
+   * every @hass/* node now opens its own independent connection). Degrades
+   * gracefully to an empty list, not an error, when no flow is running —
+   * this backs only the editor's entity autocomplete and the chat/agent's
+   * `hass_entities` MCP tool, neither of which is on any node's real
+   * execution path. */
+  queryHassEntities(): Promise<HassEntitySummary[]> {
+    const rt = [...this.flows.values()].find(
+      (r) => r.subprocess && r.status.kind === "running",
+    );
+    if (!rt?.subprocess) return Promise.resolve([]);
+    const requestId = this.nextEntityQueryRequestId++;
+    rt.subprocess.send({
+      type: "hass.entities.query",
+      requestId,
+    } satisfies CoordinatorToFlowHost);
+    return new Promise((resolve) => {
+      this.pendingEntityQueries.set(requestId, (result) =>
+        resolve(result.ok ? result.entities : []),
+      );
     });
   }
 

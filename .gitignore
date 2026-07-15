@@ -15,3 +15,9 @@ data/.gitignore
 data/agent/
 dist/
 *.log
+# worker-entry.test.ts's/worker-manager.test.ts's scratch fixture dirs —
+# created inside the package (not os.tmpdir()) so their fake block's
+# "flowbun" import resolves, cleaned up in afterEach but ignored as a
+# backstop if a run crashes mid-test.
+.worker-entry-test-*
+.worker-manager-test-*

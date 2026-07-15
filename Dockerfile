@@ -14,6 +14,7 @@ COPY package.json bun.lock ./
 COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/coordinator/package.json packages/coordinator/package.json
 COPY packages/flow-host/package.json packages/flow-host/package.json
+COPY packages/ai-host/package.json packages/ai-host/package.json
 COPY packages/editor/package.json packages/editor/package.json
 RUN bun install --frozen-lockfile
 
@@ -35,8 +36,9 @@ ENV FLOWBUN_WS_PORT=8787
 ENV FLOWBUN_EDITOR_PORT=4200
 # Redirects the Claude Agent SDK's credential/session storage (normally
 # ~/.claude, ephemeral in this container) into the bind-mounted data/ dir so
-# a one-time `claude setup-token` login survives image rebuilds. See
-# coordinator's agent/runner.ts and data/.gitignore's "agent/" entry (these
+# a one-time `claude setup-token` login survives image rebuilds. Consumed by
+# the dedicated ai-host subprocess (see packages/ai-host/src/main.ts,
+# spawned by the coordinator) and data/.gitignore's "agent/" entry (these
 # are secrets and must never be auto-committed by git-snapshot.ts).
 ENV CLAUDE_CONFIG_DIR=/app/data/agent/claude-home
 

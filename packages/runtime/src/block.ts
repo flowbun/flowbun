@@ -45,6 +45,22 @@ export interface BlockDef<
     ctx: BlockContext<Config>,
     // biome-ignore lint/suspicious/noConfusingVoidType: intentional, see comment above
   ): Promise<Partial<Outputs> | void>;
+  /**
+   * Optional — only source-style blocks with a live external subscription
+   * need it (today, just @hass/trigger). Called once, during a Worker's
+   * `init` (see flow-host/src/worker-entry.ts), before any `exec` message
+   * can arrive; `emit` pushes a value out an output port at any later time,
+   * independent of `process()`/the request-response `exec` cycle — the
+   * returned unsubscribe function is called once, at `terminate`. A block
+   * with a `subscribe` still declares `inputs: {}` and a no-op `process()`
+   * for the same reason @hass/trigger's own no-op process() already exists:
+   * so the type machinery (InputsOf/OutputsOf, the typecheck generator)
+   * treats it uniformly with every other block.
+   */
+  subscribe?(
+    ctx: BlockContext<Config>,
+    emit: (port: keyof Outputs & string, payload: unknown) => void,
+  ): Promise<() => void>;
 }
 
 /**

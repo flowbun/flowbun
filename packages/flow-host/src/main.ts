@@ -9,6 +9,7 @@ import {
 } from "flowbun";
 import type { SchedulerConfig } from "flowbun/core/scheduler";
 import { registerScheduler } from "flowbun/core/scheduler";
+import { listHassEntities } from "flowbun/hass/client";
 import type {
   CoordinatorToFlowHost,
   FlowHostToCoordinator,
@@ -64,6 +65,14 @@ async function main(): Promise<void> {
     error: (m, meta) => emit("error", m, meta),
   };
 
+  // Constructed in this order specifically to break a real cycle:
+  // WorkerManager needs Router (to route an "event" message from a
+  // subscribing block's Worker, e.g. @hass/trigger), Router needs a
+  // NodeExecutor (DistributedExecutor), and DistributedExecutor needs
+  // WorkerManager (to call .exec()). setRouter() closes the loop after
+  // everything else is constructed, always before startAll() below spawns
+  // any Worker that could possibly emit an "event" — see WorkerManager's
+  // own doc comment on setRouter().
   const workerManager = new WorkerManager(flow, DATA_DIR, logger);
   const executor: NodeExecutor = new DistributedExecutor({
     flow,
@@ -72,17 +81,33 @@ async function main(): Promise<void> {
     log: logger,
   });
   const router = new Router(flow, logger, executor);
+  workerManager.setRouter(router);
 
   process.on("message", (raw: unknown) => {
     const msg = raw as CoordinatorToFlowHost;
-    if (msg.type === "hass.event") {
-      router.emitFromSource(msg.nodeId, msg.port, msg.payload, msg.traceId);
-    } else if (msg.type === "hass.action.result") {
-      (executor as DistributedExecutor).handleActionResult(msg);
-    } else if (msg.type === "hass.read.result") {
-      (executor as DistributedExecutor).handleReadResult(msg);
-    } else if (msg.type === "agent.result") {
+    if (msg.type === "agent.result") {
       (executor as DistributedExecutor).handleAgentResult(msg);
+    } else if (msg.type === "hass.entities.query") {
+      // Lazily bootstraps this flow-host's own HA connection if it hasn't
+      // already opened one — see hass/client.ts's getHass(). Purely a
+      // read-only convenience query, not something any node's real
+      // execution depends on.
+      listHassEntities().then(
+        (entities) =>
+          send({
+            type: "hass.entities.result",
+            requestId: msg.requestId,
+            ok: true,
+            entities,
+          }),
+        (err) =>
+          send({
+            type: "hass.entities.result",
+            requestId: msg.requestId,
+            ok: false,
+            error: String(err),
+          }),
+      );
     } else if (msg.type === "flow.fireNode") {
       const node = flow.nodes.get(msg.nodeId);
       if (!node) {
@@ -120,18 +145,19 @@ async function main(): Promise<void> {
     }
   });
 
+  // @hass/trigger nodes need no special handling here anymore — they get a
+  // real Worker like any other node (see WorkerManager's own doc comment),
+  // and that Worker's own `subscribe()` hook (hass/trigger.ts) self-connects
+  // to HA and pushes "event" messages directly, with no coordinator
+  // round-trip at all.
   await workerManager.startAll();
 
-  let reqId = 1;
   const stopSchedulers: Array<() => void> = [];
   for (const [nodeId, node] of flow.nodes) {
-    if (node.block.name === "@hass/trigger" && !node.disabled) {
-      const entity = (node.config as { entity: string }).entity;
-      send({ type: "hass.subscribe", requestId: reqId++, nodeId, entity });
-    } else if (node.block.name === "@core/scheduler" && !node.disabled) {
-      // Runs entirely locally — unlike @hass/trigger, a timer isn't a shared
-      // external resource the coordinator needs to own, so this never goes
-      // over IPC (see core/scheduler.ts's own doc comment).
+    if (node.block.name === "@core/scheduler" && !node.disabled) {
+      // Runs entirely locally — a timer isn't a shared external resource
+      // anything else needs to own, so this never goes over IPC (see
+      // core/scheduler.ts's own doc comment).
       stopSchedulers.push(
         registerScheduler(node.config as SchedulerConfig, (payload) =>
           router.emitFromSource(nodeId, "fired", payload),

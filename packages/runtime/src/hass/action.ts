@@ -4,24 +4,22 @@ import { getHass, isDryRun } from "./client";
 export interface ActionCall {
   domain: string;
   service: string;
-  target?: { entity_id: string };
+  target?: { entity_id: string | string[] };
   data?: Record<string, unknown>;
 }
 
 export interface ActionConfig {
-  target?: { entity_id: string };
+  target?: { entity_id: string | string[] };
 }
 
 /**
  * The actual effect: given a fully-resolved call (target already merged in
  * by the caller — see below) and a dry-run flag, either no-op or really call
- * hass.call[domain][service](...). Deliberately has no logging of its own —
- * callers log, since they're the ones with a Logger/trace context in scope.
- *
- * Shared by two callers so this logic is never duplicated: this file's own
- * process() (Phase 1's in-process path) and the coordinator's ha-relay.ts
- * (Phase 2's distributed path, the only place this runs for real once the
- * flow-host special-cases @hass/action nodes instead of invoking process()).
+ * hass.call[domain][service](...), against this Worker's own independent
+ * connection (see hass/client.ts's getHass() — one per flow-host process,
+ * not shared). Deliberately has no logging of its own — the caller (this
+ * file's own process(), below) logs, since it's the one with a Logger/trace
+ * context in scope.
  */
 export async function performHassAction(
   call: ActionCall,

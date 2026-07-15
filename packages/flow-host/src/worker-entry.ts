@@ -5,6 +5,7 @@ import type { FlowHostToWorker, WorkerToFlowHost } from "flowbun/ipc";
 let blockDef: AnyBlockDef | undefined;
 let stateBundle: BlockContext["state"] | undefined;
 let initConfig: unknown;
+let unsubscribe: (() => void) | undefined;
 
 function post(msg: WorkerToFlowHost): void {
   postMessage(msg);
@@ -39,6 +40,23 @@ addEventListener("message", async (event: MessageEvent<FlowHostToWorker>) => {
           flow: makeStateScope(db, "flow", msg.flowName),
           global: makeStateScope(db, "global", ""),
         };
+        if (blockDef.subscribe) {
+          // No triggering input message exists yet at this point — traceId/
+          // seq/port are placeholders, meaningless for a subscribe call, kept
+          // only so BlockContext stays one uniform shape across every block
+          // lifecycle method rather than needing a second, narrower type.
+          const ctx: BlockContext = {
+            config: initConfig,
+            state: stateBundle,
+            log,
+            traceId: "subscribe",
+            seq: 0,
+            port: "",
+          };
+          unsubscribe = await blockDef.subscribe(ctx, (port, payload) =>
+            post({ type: "event", port, payload }),
+          );
+        }
         post({ type: "ready" });
       } catch (err) {
         post({
@@ -83,6 +101,7 @@ addEventListener("message", async (event: MessageEvent<FlowHostToWorker>) => {
       break;
     }
     case "terminate":
+      unsubscribe?.();
       break;
   }
 });

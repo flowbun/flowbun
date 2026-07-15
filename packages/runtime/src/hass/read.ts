@@ -20,24 +20,18 @@ export default defineBlock<
   // an action's target, so it belongs in config, not on the wire).
   inputs: { request: {} as { at: number } },
   outputs: { result: {} as EntityStateReading },
-  async process() {
-    // Boundary block — no in-process work, same pattern as @hass/action and
-    // @hass/trigger. The real read happens at the coordinator, the only
-    // process holding the live HA connection in the distributed topology
-    // (see performHassRead below and coordinator/ha-relay.ts).
-    return undefined;
+  async process(_inputs, ctx) {
+    const result = await performHassRead(ctx.config.entity);
+    return { result };
   },
 });
 
 /**
- * The actual effect: read one entity's current state+attributes from HA.
- * Shared by two callers, mirroring performHassAction's own split (see
- * hass/action.ts): this file's own process() (Phase 1's in-process path,
- * currently unreachable — see below) and the coordinator's ha-relay.ts
- * (Phase 2's distributed path, the only place this runs for real once the
- * flow-host special-cases @hass/read nodes instead of invoking process()).
- * Unlike performHassAction, this always runs for real regardless of
- * isDryRun() — a read never touches real devices, so there's nothing to gate.
+ * The actual effect: read one entity's current state+attributes from HA,
+ * against this Worker's own independent connection (see hass/client.ts's
+ * getHass() — one per flow-host process, not shared). Always runs for real
+ * regardless of isDryRun() — a read never touches real devices, so there's
+ * nothing to gate.
  */
 export async function performHassRead(
   entity: string,

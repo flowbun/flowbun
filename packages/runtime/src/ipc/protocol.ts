@@ -1,7 +1,5 @@
 import type { AgentConfig } from "../ai/agent";
-import type { ActionCall } from "../hass/action";
-import type { EntityStateReading } from "../hass/client";
-import type { TriggerOutputs } from "../hass/trigger";
+import type { HassEntitySummary } from "../hass/client";
 import type { ChatEvent, ChatSessionSummary } from "../ws/protocol";
 
 /** Mirrors coordinator's agent/tools.ts's ToolResult shape — duplicated here
@@ -25,28 +23,6 @@ export interface LogRecord {
 
 // ---------- coordinator -> flow-host (Bun.spawn ipc) ----------
 export type CoordinatorToFlowHost =
-  | {
-      type: "hass.event";
-      nodeId: string;
-      port: "changed";
-      payload: TriggerOutputs["changed"];
-      traceId?: string;
-    }
-  | { type: "hass.action.result"; requestId: number; ok: true; dryRun: boolean }
-  | {
-      type: "hass.action.result";
-      requestId: number;
-      ok: false;
-      error: string;
-      dryRun: boolean;
-    }
-  | {
-      type: "hass.read.result";
-      requestId: number;
-      ok: true;
-      reading: EntityStateReading;
-    }
-  | { type: "hass.read.result"; requestId: number; ok: false; error: string }
   | { type: "flow.fireNode"; requestId: number; nodeId: string }
   | {
       type: "agent.result";
@@ -58,32 +34,17 @@ export type CoordinatorToFlowHost =
       numTurns: number;
     }
   | { type: "agent.result"; requestId: number; ok: false; error: string }
+  /** The coordinator no longer holds any HA connection of its own (see
+   * hass/client.ts — each flow-host owns its own, independent one) — this
+   * asks an arbitrary *running* flow-host to answer on its behalf, purely
+   * for the editor's entity autocomplete and the chat/agent's
+   * `hass_entities` MCP tool. See Supervisor.queryHassEntities(). */
+  | { type: "hass.entities.query"; requestId: number }
   | { type: "shutdown" };
 
 // ---------- flow-host -> coordinator (Bun.spawn ipc) ----------
 export type FlowHostToCoordinator =
   | { type: "ready"; flow: string; nodeIds: string[] }
-  | {
-      type: "hass.subscribe";
-      requestId: number;
-      nodeId: string;
-      entity: string;
-    }
-  | {
-      type: "hass.action.call";
-      requestId: number;
-      nodeId: string;
-      /** Already fully resolved (target merged in) by the flow-host before sending. */
-      call: ActionCall;
-      /** undefined means "defer to the coordinator's global isDryRun()". */
-      dryRunOverride?: boolean;
-    }
-  | {
-      type: "hass.read.call";
-      requestId: number;
-      nodeId: string;
-      entity: string;
-    }
   | { type: "flow.fireNode.result"; requestId: number; ok: true }
   | {
       type: "flow.fireNode.result";
@@ -97,6 +58,18 @@ export type FlowHostToCoordinator =
       nodeId: string;
       input: unknown;
       config: AgentConfig;
+    }
+  | {
+      type: "hass.entities.result";
+      requestId: number;
+      ok: true;
+      entities: HassEntitySummary[];
+    }
+  | {
+      type: "hass.entities.result";
+      requestId: number;
+      ok: false;
+      error: string;
     }
   | { type: "log"; entries: LogRecord[] };
 
@@ -203,4 +176,10 @@ export type WorkerToFlowHost =
       level: "debug" | "info" | "warn" | "error";
       msg: string;
       meta?: Record<string, unknown>;
-    };
+    }
+  /** Unsolicited — pushed at any time by a block's own `subscribe()` hook
+   * (see block.ts), not in response to an `exec` request. `nodeId` is
+   * stamped by the flow-host itself (see worker-manager.ts's `wire()`),
+   * since a Worker only ever hosts one node and the block-authored `emit`
+   * callback doesn't know its own nodeId. */
+  | { type: "event"; port: string; payload: unknown };

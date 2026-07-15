@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { LoadedFlow, LoadedNode, Logger } from "flowbun";
+import type { LoadedFlow, LoadedNode, Logger, Router } from "flowbun";
 import type { FlowHostToWorker, WorkerToFlowHost } from "flowbun/ipc";
 
 const WORKER_INIT_TIMEOUT_MS = 5_000;
@@ -21,17 +21,28 @@ interface Pending {
 }
 
 /**
- * One persistent Worker per ordinary (non-@hass/*) node, spawned once in
+ * One persistent Worker per ordinary (non-@ai/agent) node, spawned once in
  * startAll() and kept alive for the flow-host's whole lifetime — never
  * per-message. This is the concrete mitigation for S1's flagged RSS-growth
  * risk: that spike stress-tested rapid repeated spawn/terminate, which this
  * design never does (a worker is only recreated on its own crash/hang, or
- * when the whole flow-host restarts).
+ * when the whole flow-host restarts). @hass/action/@hass/read/@hass/trigger
+ * nodes get a Worker like any other node now — each opens its own direct
+ * Home Assistant connection (see hass/client.ts's getHass()), independent of
+ * every other flow-host's. Only @ai/agent stays IPC-relayed to the
+ * coordinator, which is the only process holding Claude credentials.
  */
 export class WorkerManager {
   private workers = new Map<string, ManagedWorker>();
   private pending = new Map<number, Pending>();
   private nextRequestId = 1;
+  // Set via setRouter(), not the constructor: Router's own constructor needs
+  // a NodeExecutor (DistributedExecutor), which itself needs a WorkerManager
+  // — a genuine construction-order cycle. main.ts breaks it by constructing
+  // this class first, then DistributedExecutor, then Router, then calling
+  // setRouter() — always before startAll() spawns any Worker that could
+  // possibly emit an "event" message this needs to route.
+  private router: Router | undefined;
 
   constructor(
     private readonly flow: LoadedFlow,
@@ -39,16 +50,15 @@ export class WorkerManager {
     private readonly log: Logger,
   ) {}
 
+  setRouter(router: Router): void {
+    this.router = router;
+  }
+
   async startAll(): Promise<void> {
     const dbPath = join(this.dataDir, "state", "flowbun.sqlite");
     await Promise.all(
       [...this.flow.nodes]
-        .filter(
-          ([, n]) =>
-            !n.block.name.startsWith("@hass/") &&
-            n.block.name !== "@ai/agent" &&
-            !n.disabled,
-        )
+        .filter(([, n]) => n.block.name !== "@ai/agent" && !n.disabled)
         .map(([nodeId, node]) => this.spawn(nodeId, node, dbPath)),
     );
   }
@@ -84,6 +94,15 @@ export class WorkerManager {
           this.pending.get(msg.requestId)?.reject(new Error(msg.error));
         else if (msg.type === "log")
           this.log[msg.level](msg.msg, { ...msg.meta, node: managed.nodeId });
+        else if (msg.type === "event") {
+          if (!this.router) {
+            this.log.error("worker.event_before_router_set", {
+              node: managed.nodeId,
+            });
+            return;
+          }
+          this.router.emitFromSource(managed.nodeId, msg.port, msg.payload);
+        }
       },
     );
     managed.worker.addEventListener("error", (e) => {
