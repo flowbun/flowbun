@@ -1,5 +1,6 @@
 import type { AgentConfig } from "../ai/agent";
-import type { HassEntitySummary } from "../hass/client";
+import type { ActionCall } from "../hass/action";
+import type { EntityStateReading, HassEntitySummary } from "../hass/client";
 import type { ChatEvent, ChatSessionSummary } from "../ws/protocol";
 
 /** Mirrors coordinator's agent/tools.ts's ToolResult shape — duplicated here
@@ -163,7 +164,16 @@ export type FlowHostToWorker =
       traceId: string;
       seq: number;
     }
-  | { type: "terminate" };
+  | { type: "terminate" }
+  /** Reply to a Worker's own "hass.read" — see WorkerToFlowHost below. */
+  | {
+      type: "hass.read.result";
+      requestId: number;
+      reading: EntityStateReading | undefined;
+    }
+  /** Reply to a Worker's own "hass.call". */
+  | { type: "hass.call.result"; requestId: number; ok: true }
+  | { type: "hass.call.result"; requestId: number; ok: false; error: string };
 
 // ---------- worker -> flow-host (postMessage) ----------
 export type WorkerToFlowHost =
@@ -182,4 +192,13 @@ export type WorkerToFlowHost =
    * stamped by the flow-host itself (see worker-manager.ts's `wire()`),
    * since a Worker only ever hosts one node and the block-authored `emit`
    * callback doesn't know its own nodeId. */
-  | { type: "event"; port: string; payload: unknown };
+  | { type: "event"; port: string; payload: unknown }
+  /** A node's Worker has no Home Assistant connection of its own — the flow
+   * owns exactly one, in the flow-host's main thread (see hass/client.ts's
+   * setHassReadTransport doc comment). readEntityState() inside a Worker
+   * relays through these two instead of calling getHass() directly;
+   * worker-manager.ts answers using its own direct call into
+   * flowbun/hass/client, then posts back "hass.read.result". */
+  | { type: "hass.read"; requestId: number; entity: string }
+  /** Same relay, for the write side (flowbun/hass/action's performHassAction). */
+  | { type: "hass.call"; requestId: number; call: ActionCall; dryRun: boolean };

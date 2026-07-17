@@ -10,6 +10,7 @@
   --success: #4caf82;
   --warning: #d9a441;
   --error: #e05c5c;
+  --disabled: #e08a3c;
   --radius: 6px;
   --font-mono:
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -418,8 +419,13 @@ body {
 }
 
 .status-crash-looped .status-dot,
-.status-failed-typecheck .status-dot {
+.status-failed-typecheck .status-dot,
+.status-failed-load .status-dot {
   background: var(--error);
+}
+
+.status-disabled .status-dot {
+  background: var(--disabled);
 }
 
 .log-panel {
@@ -1047,6 +1053,32 @@ body {
   font-size: 12px;
 }
 
+/* Looks like the plain bold label it replaces until you actually interact
+   with it -- a visible text-input chrome here would make every node's
+   name look editable-and-different from the rest of the panel even when
+   nobody's touching it. */
+.node-config-id-input {
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin: -1px -4px;
+  width: 100%;
+}
+
+.node-config-id-input:hover {
+  border-color: var(--border);
+}
+
+.node-config-id-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
 .node-config-enabled-toggle {
   display: flex;
   align-items: center;
@@ -1055,6 +1087,16 @@ body {
   font-size: 12px;
   color: var(--text-dim);
   cursor: pointer;
+}
+
+.node-config-error {
+  margin: 6px 0 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--error);
+  border-radius: 4px;
+  color: var(--error);
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .node-config-section h4 {

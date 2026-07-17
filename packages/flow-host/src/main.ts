@@ -10,6 +10,8 @@ import {
 import type { SchedulerConfig } from "flowbun/core/scheduler";
 import { registerScheduler } from "flowbun/core/scheduler";
 import { listHassEntities } from "flowbun/hass/client";
+import type { TriggerConfig } from "flowbun/hass/trigger";
+import { registerHassTrigger } from "flowbun/hass/trigger";
 import type {
   CoordinatorToFlowHost,
   FlowHostToCoordinator,
@@ -145,32 +147,51 @@ async function main(): Promise<void> {
     }
   });
 
-  // @hass/trigger nodes need no special handling here anymore — they get a
-  // real Worker like any other node (see WorkerManager's own doc comment),
-  // and that Worker's own `subscribe()` hook (hass/trigger.ts) self-connects
-  // to HA and pushes "event" messages directly, with no coordinator
-  // round-trip at all.
+  // @hass/trigger nodes get no Worker at all (see WorkerManager.startAll's
+  // filter) — they're handled directly below, right alongside
+  // @core/scheduler, since both are node types the flow-host itself owns
+  // rather than delegating to a per-node Worker.
   await workerManager.startAll();
 
-  const stopSchedulers: Array<() => void> = [];
+  const stopLocalSubscriptions: Array<() => void> = [];
+  const triggerSubscriptions: Array<Promise<void>> = [];
   for (const [nodeId, node] of flow.nodes) {
     if (node.block.name === "@core/scheduler" && !node.disabled) {
       // Runs entirely locally — a timer isn't a shared external resource
       // anything else needs to own, so this never goes over IPC (see
       // core/scheduler.ts's own doc comment).
-      stopSchedulers.push(
+      stopLocalSubscriptions.push(
         registerScheduler(node.config as SchedulerConfig, (payload) =>
           router.emitFromSource(nodeId, "fired", payload),
         ),
       );
+    } else if (node.block.name === "@hass/trigger" && !node.disabled) {
+      // The flow's one real Home Assistant connection lives here, in the
+      // flow-host's own main thread (see hass/client.ts's
+      // setHassReadTransport doc comment and WorkerManager's own doc
+      // comment) — not in a Worker, so this subscribes directly rather than
+      // going through workerManager.exec(). registerHassTrigger() awaits
+      // getHass() internally, which is what actually opens the connection
+      // the first time any node needs it. Awaited below (not fire-and-
+      // forget) so "ready" isn't sent until every trigger is actually live
+      // — matching the guarantee the old per-node-Worker init used to give
+      // for free via workerManager.startAll()'s own await.
+      triggerSubscriptions.push(
+        registerHassTrigger(node.config as TriggerConfig, (payload) =>
+          router.emitFromSource(nodeId, "changed", payload),
+        ).then((stop) => {
+          stopLocalSubscriptions.push(stop);
+        }),
+      );
     }
   }
+  await Promise.all(triggerSubscriptions);
 
   send({ type: "ready", flow: flow.name, nodeIds: [...flow.nodes.keys()] });
   logger.info("flow-host.ready", { pid: process.pid });
 
   async function shutdown(): Promise<void> {
-    for (const stop of stopSchedulers) stop();
+    for (const stop of stopLocalSubscriptions) stop();
     await workerManager.stopAll();
     db.close();
     process.exit(0);

@@ -13,19 +13,41 @@ export interface ActionConfig {
 }
 
 /**
+ * A flow owns exactly one real Home Assistant connection, opened once in the
+ * flow-host's main thread (see hass/client.ts's doc comment on
+ * setHassReadTransport and WorkerManager's own doc comment) — a node's
+ * Worker has no connection of its own and relays through `callTransport`
+ * instead (installed by worker-entry.ts). Unset (null) wherever a real
+ * connection is already directly at hand: the flow-host's own main thread,
+ * and Phase 1's single-process in-process demo.
+ */
+export interface HassCallTransport {
+  call(action: ActionCall, dryRun: boolean): Promise<void>;
+}
+
+let callTransport: HassCallTransport | null = null;
+
+export function setHassCallTransport(
+  transport: HassCallTransport | null,
+): void {
+  callTransport = transport;
+}
+
+/**
  * The actual effect: given a fully-resolved call (target already merged in
  * by the caller — see below) and a dry-run flag, either no-op or really call
- * hass.call[domain][service](...), against this Worker's own independent
- * connection (see hass/client.ts's getHass() — one per flow-host process,
- * not shared). Deliberately has no logging of its own — the caller (this
- * file's own process(), below) logs, since it's the one with a Logger/trace
- * context in scope.
+ * hass.call[domain][service](...). Routes through `callTransport` when one's
+ * installed (a node's Worker); otherwise calls straight out over this
+ * thread's own `getHass()` connection. Deliberately has no logging of its
+ * own — the caller (this file's own process(), below) logs, since it's the
+ * one with a Logger/trace context in scope.
  */
 export async function performHassAction(
   call: ActionCall,
   dryRun: boolean,
 ): Promise<void> {
   if (dryRun) return;
+  if (callTransport) return callTransport.call(call, dryRun);
   const hass = await getHass();
   // DA's hass.call proxy sends whatever object we pass verbatim as the
   // websocket message's service_data — there's no separate "target" slot at

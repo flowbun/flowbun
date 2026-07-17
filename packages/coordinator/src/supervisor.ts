@@ -77,6 +77,32 @@ export class Supervisor {
     this.spawn(rt);
   }
 
+  /** Registers a flow that isn't running and won't be spawning a subprocess
+   * right now — either because it never got to run at all (assembleFlow
+   * rejected its wiring, or it failed the initial typecheck gate) or because
+   * its wiring has `disabled: true` (a deliberate, non-failure choice; see
+   * main.ts's applyRunState). Either way it still gets a status the editor
+   * can show, and a Supervisor entry so a later call looks it up by name
+   * instead of silently no-oping on a flow the supervisor never heard of
+   * (restartFlow/stopFlow both do this). */
+  registerInactive(
+    wiringPath: string,
+    flowName: string,
+    status: FlowStatus,
+  ): void {
+    const rt: FlowRuntime = {
+      wiringPath,
+      flowName,
+      subprocess: null,
+      status: { kind: "starting" },
+      crashTimestamps: [],
+      errorTimestamps: [],
+      expectingExit: false,
+    };
+    this.flows.set(flowName, rt);
+    this.setStatus(rt, status);
+  }
+
   private spawn(rt: FlowRuntime): void {
     // A respawning flow-host might have in-flight work whose result nobody
     // will ever receive once this subprocess is gone — an @ai/agent call
@@ -323,11 +349,6 @@ export class Supervisor {
       stillRunning: pid !== undefined,
       pid,
     });
-  }
-
-  markAllFailedTypecheck(output: string): void {
-    for (const rt of this.flows.values())
-      this.markFailedTypecheck(rt.flowName, output);
   }
 
   private setStatus(rt: FlowRuntime, status: FlowStatus): void {

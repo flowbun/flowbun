@@ -35,6 +35,14 @@ export const WiringSchema = z
     name: z.string().min(1),
     nodes: z.record(z.string().regex(NODE_ID_RE), WiringNodeSchema),
     wires: z.array(WireSchema),
+    // Whole-flow equivalent of a node's own `disabled` — omitted (not
+    // `false`) means enabled, same "existing committed files stay clean"
+    // convention as WiringNodeSchema.disabled above. Unlike a node's
+    // disabled flag (a router-level no-op, still reaches assembleFlow), this
+    // one is read by the coordinator itself: a disabled flow never gets a
+    // flow-host subprocess at all (see supervisor.ts / main.ts's
+    // applyRunState).
+    disabled: z.boolean().optional(),
   })
   .superRefine((flow, ctx) => {
     flow.wires.forEach((wire, idx) => {

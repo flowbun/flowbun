@@ -16,13 +16,18 @@ export function label(status: FlowStatus): string {
       return status.stillRunning
         ? "typecheck failed (old flow still running)"
         : "typecheck failed";
+    case "failed-load":
+      return "failed to load (invalid wiring)";
     case "crash-looped":
       return `crash-looped (${status.attempts} attempts)`;
+    case "disabled":
+      return "disabled";
   }
 }
 
 function detail(status: FlowStatus): string | undefined {
-  if (status.kind === "failed-typecheck") return status.output;
+  if (status.kind === "failed-typecheck" || status.kind === "failed-load")
+    return status.output;
   return undefined;
 }
 

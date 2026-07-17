@@ -9,8 +9,6 @@ import hassRead from "../hass/read";
 import hassTrigger from "../hass/trigger";
 import type { BlockRegistry } from "../wiring/flow-assembly";
 
-export class BlockDiscoveryError extends Error {}
-
 function isBlockDef(
   mod: Record<string, unknown>,
 ): mod is { default: AnyBlockDef } {
@@ -73,11 +71,45 @@ export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
 
   for await (const file of glob.scan({ cwd: blocksDir })) {
     const absPath = join(blocksDir, file);
-    const mod = await import(absPath);
-    if (!isBlockDef(mod)) {
-      throw new BlockDiscoveryError(
-        `${absPath} does not have a valid defineBlock default export`,
+    // Bun's ES module cache is keyed by the resolved specifier string, not
+    // file content or mtime -- a bare `import(absPath)` on the *second*
+    // discoverBlocks() call for the same path within one coordinator
+    // process returns the module object from the first call, silently
+    // ignoring whatever's actually on disk now. Every real block file
+    // already gets imported once at coordinator startup, so this bit
+    // *every* live block-port edit made through the editor after that,
+    // not just repeated reloads (e.g. restoreFlow's write-then-validate):
+    // assembleFlow kept validating against the stale, startup-time port
+    // shape instead of the just-saved one. A cache-busting query string
+    // forces a genuinely fresh read+evaluate every call, matching what
+    // every caller here already assumes ("the registry reflects what's on
+    // disk right now").
+    // A syntactically broken block file (a real possibility mid-edit, or a
+    // typo saved by mistake) makes `import()` throw -- previously bare and
+    // uncaught here, which took discoverBlocks(), and every one of its
+    // callers (coordinator startup, every reload path, every flow-host
+    // subprocess's own registry build) down with it: one bad block file
+    // could crash the entire coordinator process, not just fail to load.
+    // Skipping the broken file here instead means any flow that actually
+    // references it fails on its own, in the open, via assembleFlow's
+    // already-isolated "unknown block" error (see loadAllFlows/
+    // reloadBlocksAndRestartAll in coordinator/main.ts) -- a flow that
+    // doesn't reference it is completely unaffected, exactly like any
+    // other single-flow structural failure.
+    let mod: Record<string, unknown>;
+    try {
+      mod = await import(`${absPath}?t=${Date.now()}`);
+    } catch (err) {
+      console.error(
+        `[discoverBlocks] ${absPath} failed to import, skipping it:\n${err}`,
       );
+      continue;
+    }
+    if (!isBlockDef(mod)) {
+      console.error(
+        `[discoverBlocks] ${absPath} does not have a valid defineBlock default export, skipping it`,
+      );
+      continue;
     }
     const relSpecifier = relative(generatedDir, absPath).replace(/\.ts$/, "");
     registry.set(mod.default.name, {

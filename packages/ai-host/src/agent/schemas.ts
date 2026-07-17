@@ -39,6 +39,15 @@ export const WiringMutationSchema = z.discriminatedUnion("op", [
     nodeId: z.string(),
     disabled: z.boolean(),
   }),
+  z.object({
+    op: z.literal("flow.disabled"),
+    disabled: z.boolean(),
+  }),
+  z.object({
+    op: z.literal("node.rename"),
+    nodeId: z.string(),
+    newNodeId: z.string(),
+  }),
   z.object({ op: z.literal("wire.add"), from: z.string(), to: z.string() }),
   z.object({ op: z.literal("wire.remove"), from: z.string(), to: z.string() }),
   z.object({

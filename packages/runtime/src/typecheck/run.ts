@@ -57,6 +57,12 @@ export async function runTypecheck(
         "flowbun/hass/trigger": [`${runtimeSrcRel}/hass/trigger.ts`],
         "flowbun/hass/action": [`${runtimeSrcRel}/hass/action.ts`],
         "flowbun/hass/read": [`${runtimeSrcRel}/hass/read.ts`],
+        // Resolved fine without an explicit entry too (moduleResolution:
+        // "bundler" falls back to node_modules/flowbun's package.json
+        // "exports" map), but every sibling subpath gets one, and relying
+        // on the implicit fallback for just this one is a trap for the
+        // next person who assumes this list is exhaustive.
+        "flowbun/hass/client": [`${runtimeSrcRel}/hass/client.ts`],
         "flowbun/core/scheduler": [`${runtimeSrcRel}/core/scheduler.ts`],
         "flowbun/core/inject": [`${runtimeSrcRel}/core/inject.ts`],
         "flowbun/core/debug": [`${runtimeSrcRel}/core/debug.ts`],

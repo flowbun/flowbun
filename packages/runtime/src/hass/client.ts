@@ -57,6 +57,32 @@ export function getHass(): Promise<SimpleHass> {
 }
 
 /**
+ * A flow owns exactly one real Home Assistant connection (see the module
+ * doc comment on registerHassTrigger in trigger.ts and WorkerManager's own
+ * doc comment) — it's opened once, in the flow-host's main thread, not in
+ * any per-node Worker. An ordinary block's `process()` still just calls
+ * `readEntityState()` below regardless of which thread it's running in;
+ * `setHassReadTransport()` is how worker-entry.ts (running inside a node's
+ * Worker, which has no HA connection of its own) points that same function
+ * at a postMessage relay to its parent flow-host instead of a local
+ * `getHass()` call — the one place that *does* have the connection. Unset
+ * (null) in every context that already has direct access to the real
+ * connection: the flow-host's own main thread, and Phase 1's single-process
+ * in-process demo.
+ */
+export interface HassReadTransport {
+  readEntity(entityId: string): Promise<EntityStateReading | undefined>;
+}
+
+let readTransport: HassReadTransport | null = null;
+
+export function setHassReadTransport(
+  transport: HassReadTransport | null,
+): void {
+  readTransport = transport;
+}
+
+/**
  * Read-only enumeration for the editor's entity autocomplete — never touches
  * hass.call, so it's safe regardless of isDryRun().
  */
@@ -72,12 +98,17 @@ export async function listHassEntities(): Promise<HassEntitySummary[]> {
 
 /**
  * On-demand snapshot read of any entity's current state+attributes — the
- * boundary @hass/read (hass/read.ts) leans on. Safe regardless of
- * isDryRun(): never touches hass.call, same reasoning as listHassEntities.
+ * boundary @hass/read (hass/read.ts) leans on, along with any ordinary block
+ * (e.g. battery_controller) that reads a live entity directly. Routes
+ * through `readTransport` when one's been installed (a node's Worker —
+ * see setHassReadTransport's doc comment); otherwise reads straight off this
+ * thread's own `getHass()` connection. Safe regardless of isDryRun(): never
+ * touches hass.call, same reasoning as listHassEntities.
  */
 export async function readEntityState(
   entityId: string,
 ): Promise<EntityStateReading | undefined> {
+  if (readTransport) return readTransport.readEntity(entityId);
   const hass = await getHass();
   const current = hass.entity.getCurrentState(entityId);
   if (!current) return undefined;

@@ -1,4 +1,5 @@
 import type { FlowEntry } from "flowbun/ws";
+import { useState } from "react";
 import { createPortal } from "react-dom";
 import { FlowStatusBadge } from "./FlowStatusBadge";
 
@@ -11,10 +12,18 @@ import { FlowStatusBadge } from "./FlowStatusBadge";
 export function FlowDetailModal({
   entry,
   onClose,
+  onToggleDisabled,
 }: {
   entry: FlowEntry;
   onClose: () => void;
+  /** Flips the whole flow's `disabled` flag — unlike a node's own disabled
+   * toggle (a router-level no-op), this actually stops/starts the flow's
+   * bun subprocess; see main.ts's applyRunState. */
+  onToggleDisabled: (next: boolean) => Promise<{ ok: boolean; error?: string }>;
 }) {
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const disabled = entry.wiring.disabled ?? false;
+
   return createPortal(
     <div
       className="create-dialog-overlay"
@@ -50,6 +59,24 @@ export function FlowDetailModal({
           <pre className="flow-detail-typecheck-output">
             {entry.status.output}
           </pre>
+        )}
+        <label className="node-config-enabled-toggle">
+          <input
+            type="checkbox"
+            checked={!disabled}
+            onChange={async (e) => {
+              const result = await onToggleDisabled(!e.target.checked);
+              setMutationError(
+                result.ok ? null : (result.error ?? "mutation failed"),
+              );
+            }}
+          />
+          {disabled ? "Disabled" : "Enabled"}
+        </label>
+        {mutationError && (
+          <div className="node-config-error" role="alert">
+            {mutationError}
+          </div>
         )}
         <div className="create-dialog-actions">
           <button type="button" onClick={onClose}>

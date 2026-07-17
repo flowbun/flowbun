@@ -271,13 +271,14 @@ function Shell() {
           )}
           {selectedNode && selectedNodeId && entry && (
             <ConfigEditor
+              key={selectedNodeId}
               nodeId={selectedNodeId}
               block={selectedNode.block}
               config={selectedNode.config}
               def={selectedDef}
               disabled={selectedNode.disabled ?? false}
-              onToggleDisabled={(next) => {
-                send({
+              onToggleDisabled={async (next) => {
+                const r = await send({
                   type: "wiring.mutate",
                   requestId: generateRequestId(),
                   file: entry.file,
@@ -287,20 +288,28 @@ function Shell() {
                     disabled: next,
                   },
                 });
+                return r.type === "wiring.mutateResult"
+                  ? r
+                  : { ok: false, error: "unexpected response from server" };
               }}
               onClose={() => navigate(entry.file, null)}
               onOpenBlockEditor={setBlockEditorFile}
-              onDelete={() => {
-                send({
+              onDelete={async () => {
+                const r = await send({
                   type: "wiring.mutate",
                   requestId: generateRequestId(),
                   file: entry.file,
                   mutation: { op: "node.remove", nodeId: selectedNodeId },
                 });
-                navigate(entry.file, null);
+                const result: { ok: boolean; error?: string } =
+                  r.type === "wiring.mutateResult"
+                    ? r
+                    : { ok: false, error: "unexpected response from server" };
+                if (result.ok) navigate(entry.file, null);
+                return result;
               }}
-              onSave={(config) => {
-                send({
+              onSave={async (config) => {
+                const r = await send({
                   type: "wiring.mutate",
                   requestId: generateRequestId(),
                   file: entry.file,
@@ -310,6 +319,30 @@ function Shell() {
                     config,
                   },
                 });
+                return r.type === "wiring.mutateResult"
+                  ? r
+                  : { ok: false, error: "unexpected response from server" };
+              }}
+              onRename={async (newNodeId) => {
+                const r = await send({
+                  type: "wiring.mutate",
+                  requestId: generateRequestId(),
+                  file: entry.file,
+                  mutation: {
+                    op: "node.rename",
+                    nodeId: selectedNodeId,
+                    newNodeId,
+                  },
+                });
+                const result: { ok: boolean; error?: string } =
+                  r.type === "wiring.mutateResult"
+                    ? r
+                    : { ok: false, error: "unexpected response from server" };
+                // The old id no longer exists once this succeeds — follow
+                // the rename so the panel keeps showing the same node
+                // instead of pointing at an id that just vanished.
+                if (result.ok) navigate(entry.file, newNodeId);
+                return result;
               }}
             />
           )}
@@ -387,6 +420,17 @@ function Shell() {
         <FlowDetailModal
           entry={flowDetailEntry}
           onClose={() => setFlowDetailFile(null)}
+          onToggleDisabled={async (next) => {
+            const r = await send({
+              type: "wiring.mutate",
+              requestId: generateRequestId(),
+              file: flowDetailEntry.file,
+              mutation: { op: "flow.disabled", disabled: next },
+            });
+            return r.type === "wiring.mutateResult"
+              ? r
+              : { ok: false, error: "unexpected response from server" };
+          }}
         />
       )}
       {statsOpen && <SystemStatsModal onClose={() => setStatsOpen(false)} />}

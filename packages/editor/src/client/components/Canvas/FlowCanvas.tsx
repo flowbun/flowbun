@@ -11,6 +11,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  type Viewport,
 } from "@xyflow/react";
 import type { Wiring } from "flowbun/wiring";
 import type { BlockPaletteEntry } from "flowbun/ws";
@@ -33,6 +34,40 @@ import {
 
 const nodeTypes = { block: BlockNode };
 const edgeTypes = { deletable: DeletableEdge };
+
+function viewportKey(flowName: string): string {
+  return `flowbun.viewport.${flowName}`;
+}
+
+function readStoredViewport(flowName: string): Viewport | undefined {
+  try {
+    const stored = window.localStorage.getItem(viewportKey(flowName));
+    if (!stored) return undefined;
+    const parsed = JSON.parse(stored);
+    if (
+      typeof parsed?.x === "number" &&
+      typeof parsed?.y === "number" &&
+      typeof parsed?.zoom === "number"
+    ) {
+      return parsed as Viewport;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeStoredViewport(flowName: string, viewport: Viewport): void {
+  try {
+    window.localStorage.setItem(
+      viewportKey(flowName),
+      JSON.stringify(viewport),
+    );
+  } catch {
+    // localStorage unavailable/full (private browsing, quota) — viewport
+    // just won't persist this session.
+  }
+}
 
 function Inner({
   file,
@@ -71,6 +106,17 @@ function Inner({
   const [edges, setEdges] = useState<Edge<WireEdgeData>[]>(graphEdges);
   const rf = useReactFlow();
   const prevNodeCount = useRef(graphNodes.length);
+  // FlowCanvas/Inner is never remounted when switching between flow tabs
+  // (no `key` on it in App.tsx) — the same ReactFlowProvider persists for
+  // the whole session, which is what lets a flow's viewport survive a tab
+  // switch at all. This ref is how the effect below tells "switched to a
+  // different flow" apart from "same flow, nodes/edges just changed".
+  const currentFileRef = useRef(file);
+  // Read once, lazily, for the very first flow shown this page load — fed
+  // to <ReactFlow>'s defaultViewport/fitView props below so the correct
+  // view applies on React Flow's own first paint instead of flashing an
+  // untransformed viewport and then correcting it a tick later.
+  const [initialViewport] = useState(() => readStoredViewport(wiring.name));
 
   // The server (via flow.updated broadcasts) is the sole source of truth —
   // no optimistic local mutation of graph state on user actions; this
@@ -89,15 +135,32 @@ function Inner({
         data: { ...(e.data as WireEdgeData), file },
       })),
     );
-    // A node was added (desktop drag-drop or mobile tap-to-add) — its
-    // placeholder position may well be outside the current pan/zoom, with
-    // no way to find it otherwise. Re-fit only on a genuine count increase,
-    // not on every drag/config-edit broadcast.
-    if (graphNodes.length > prevNodeCount.current) {
+
+    if (currentFileRef.current !== file) {
+      // Switched to a different flow tab — restore *that* flow's own last
+      // viewport instead of comparing node counts against the flow we just
+      // left (the bug this replaces: an unrelated flow with more nodes
+      // than the previous one used to spuriously trigger a fitView here).
+      currentFileRef.current = file;
+      const stored = readStoredViewport(wiring.name);
+      if (stored) rf.setViewport(stored, { duration: 0 });
+      else rf.fitView({ duration: 0 });
+    } else if (graphNodes.length > prevNodeCount.current) {
+      // A node was added (desktop drag-drop or mobile tap-to-add) — its
+      // placeholder position may well be outside the current pan/zoom,
+      // with no way to find it otherwise. Re-fit only on a genuine count
+      // increase, not on every drag/config-edit broadcast.
       rf.fitView({ duration: 300 });
     }
     prevNodeCount.current = graphNodes.length;
-  }, [graphNodes, graphEdges, file, rf]);
+  }, [graphNodes, graphEdges, file, wiring.name, rf]);
+
+  const onMoveEnd = useCallback(
+    (_event: unknown, viewport: Viewport) => {
+      writeStoredViewport(wiring.name, viewport);
+    },
+    [wiring.name],
+  );
 
   const onNodesChange = useCallback(
     (changes: NodeChange<Node<BlockNodeData>>[]) => {
@@ -256,8 +319,14 @@ function Inner({
         onNodeDoubleClick={isMobile ? undefined : onNodeDoubleClick}
         onNodeClick={(_event, node) => onSelectNode(node.id)}
         onPaneClick={() => onSelectNode(null)}
+        onMoveEnd={onMoveEnd}
         colorMode="dark"
-        fitView
+        // Only auto-fit on this flow's very first-ever open in this
+        // browser (no stored viewport yet) — once a viewport's been
+        // persisted, defaultViewport takes over instead (fitView ignores
+        // defaultViewport when both are set).
+        fitView={!initialViewport}
+        defaultViewport={initialViewport}
         // Default is "Space" — a window-level keydown listener that's live
         // whenever this canvas is mounted, including underneath overlays
         // like MonacoBlockEditor. If focus isn't exactly on an input when

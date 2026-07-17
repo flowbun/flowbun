@@ -20,6 +20,10 @@ export function describeMutation(mutation: WiringMutation): string {
       return `move node: ${mutation.nodeId}`;
     case "node.disabled":
       return `${mutation.disabled ? "disable" : "enable"} node: ${mutation.nodeId}`;
+    case "flow.disabled":
+      return mutation.disabled ? "disable flow" : "enable flow";
+    case "node.rename":
+      return `rename node: ${mutation.nodeId} -> ${mutation.newNodeId}`;
     case "wire.add":
       return `add wire: ${mutation.from} -> ${mutation.to}`;
     case "wire.remove":
@@ -133,6 +137,57 @@ export function applyMutation(
         mutation.disabled ? true : undefined,
       );
       break;
+    case "flow.disabled":
+      // Same "omit rather than write false" convention as node.disabled,
+      // one level up — this is the top-level field WiringSchema.disabled
+      // reads, not scoped to any one node.
+      edit(["disabled"], mutation.disabled ? true : undefined);
+      break;
+    case "node.rename": {
+      if (mutation.newNodeId === mutation.nodeId) break; // no-op
+      if (!(mutation.nodeId in current.nodes)) {
+        throw new WiringWriteError(`node "${mutation.nodeId}" does not exist`);
+      }
+      if (mutation.newNodeId in current.nodes) {
+        throw new WiringWriteError(
+          `node "${mutation.newNodeId}" already exists`,
+        );
+      }
+      // jsonc-parser's modify() has no primitive for "rename an object
+      // key" -- only set/delete-at-path -- so this is move-by-copy: write
+      // the node's existing data under the new key, then delete the old
+      // one. Same "accept a sibling reformat" tradeoff node.add/
+      // node.remove already make, and the new key lands at the end of
+      // `nodes` rather than at the old key's position, matching how
+      // node.add already behaves (no attempt to preserve position).
+      const nodeData = current.nodes[mutation.nodeId];
+      // Every wire endpoint referencing the old id must move with it, in
+      // the same mutation -- otherwise the file would pass through an
+      // invalid intermediate state (a wire pointing at a node id that no
+      // longer exists) even if only for the instant between two edits.
+      // Whole-array replace, not per-index edits, for the same reason
+      // node.remove's wire cascade uses one (see its own comment): a
+      // per-index edit trips a real jsonc-parser bug on a single-line
+      // array's last element.
+      const renamed = current.wires.map((wire) => {
+        const [a, b] = wire as [string, string];
+        const renameEndpoint = (ref: string) => {
+          const parsed = parsePortRef(ref);
+          return parsed.nodeId === mutation.nodeId
+            ? `${mutation.newNodeId}.${parsed.port}`
+            : ref;
+        };
+        return [renameEndpoint(a), renameEndpoint(b)];
+      });
+      const wiresChanged = renamed.some(([a, b], i) => {
+        const [origA, origB] = current.wires[i] as [string, string];
+        return a !== origA || b !== origB;
+      });
+      if (wiresChanged) edit(["wires"], renamed);
+      edit(["nodes", mutation.newNodeId], nodeData);
+      edit(["nodes", mutation.nodeId], undefined);
+      break;
+    }
     case "wire.add":
       edit(["wires", current.wires.length], [mutation.from, mutation.to], true);
       break;

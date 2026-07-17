@@ -231,6 +231,100 @@ describe("applyMutation round-trip fidelity", () => {
     expect(mutated).toBe(original);
   });
 
+  test("node.rename moves the node's data to the new key and rewrites every wire endpoint touching it", () => {
+    const original = readFileSync(FILE, "utf8");
+    const mutated = applyMutation(original, {
+      op: "node.rename",
+      nodeId: "settle",
+      newNodeId: "settle_renamed",
+    });
+    const parsed = JSON.parse(mutated);
+    const parsedOriginal = JSON.parse(original);
+
+    expect(parsed.nodes.settle).toBeUndefined();
+    expect(parsed.nodes.settle_renamed).toEqual(parsedOriginal.nodes.settle);
+    // Every other node is completely untouched.
+    expect(parsed.nodes.motion).toEqual(parsedOriginal.nodes.motion);
+    expect(parsed.nodes.decide).toEqual(parsedOriginal.nodes.decide);
+    expect(parsed.nodes.lights).toEqual(parsedOriginal.nodes.lights);
+    // Both wire endpoints referencing "settle" follow the rename; the one
+    // wire that never touched it (decide.command -> lights.call) is
+    // untouched.
+    expect(parsed.wires).toEqual([
+      ["motion.changed", "settle_renamed.signal"],
+      ["settle_renamed.stable", "decide.presence"],
+      ["decide.command", "lights.call"],
+    ]);
+  });
+
+  test("node.rename to the same name is a no-op", () => {
+    const original = readFileSync(FILE, "utf8");
+    const mutated = applyMutation(original, {
+      op: "node.rename",
+      nodeId: "settle",
+      newNodeId: "settle",
+    });
+    expect(mutated).toBe(original);
+  });
+
+  test("node.rename to an already-existing node id throws rather than silently overwriting it", () => {
+    const original = readFileSync(FILE, "utf8");
+    expect(() =>
+      applyMutation(original, {
+        op: "node.rename",
+        nodeId: "settle",
+        newNodeId: "decide",
+      }),
+    ).toThrow(WiringWriteError);
+  });
+
+  test("node.rename of a nonexistent node throws", () => {
+    const original = readFileSync(FILE, "utf8");
+    expect(() =>
+      applyMutation(original, {
+        op: "node.rename",
+        nodeId: "does-not-exist",
+        newNodeId: "whatever",
+      }),
+    ).toThrow(WiringWriteError);
+  });
+
+  test("node.rename to an invalid identifier throws via the post-edit schema check", () => {
+    const original = readFileSync(FILE, "utf8");
+    // "-" isn't a valid node id character (NODE_ID_RE in wiring/schema.ts) —
+    // this isn't special-cased in applyMutation itself, it's caught by the
+    // same post-edit WiringSchema.safeParse that catches every other
+    // structurally-invalid result.
+    expect(() =>
+      applyMutation(original, {
+        op: "node.rename",
+        nodeId: "settle",
+        newNodeId: "not-a-valid-id",
+      }),
+    ).toThrow(WiringWriteError);
+  });
+
+  test("flow.disabled: true adds the top-level field, false removes it entirely", () => {
+    const original = readFileSync(FILE, "utf8");
+    expect(JSON.parse(original).disabled).toBeUndefined();
+
+    const disabled = applyMutation(original, {
+      op: "flow.disabled",
+      disabled: true,
+    });
+    expect(JSON.parse(disabled).disabled).toBe(true);
+    // Every node/wire untouched — this is a whole-flow field, not scoped to
+    // any one node.
+    expect(JSON.parse(disabled).nodes).toEqual(JSON.parse(original).nodes);
+    expect(JSON.parse(disabled).wires).toEqual(JSON.parse(original).wires);
+
+    const reenabled = applyMutation(disabled, {
+      op: "flow.disabled",
+      disabled: false,
+    });
+    expect(JSON.parse(reenabled).disabled).toBeUndefined();
+  });
+
   test("node.config on a nonexistent node throws rather than silently creating an invalid node", () => {
     const original = readFileSync(FILE, "utf8");
     // jsonc-parser's modify() would happily create {"nodes":{"does-not-exist":{"config":{}}}}

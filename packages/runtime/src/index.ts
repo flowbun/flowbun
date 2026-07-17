@@ -9,7 +9,7 @@ export type {
   StateScope,
 } from "./block";
 export { defineBlock } from "./block";
-export { BlockDiscoveryError, discoverBlocks } from "./discovery/block-loader";
+export { discoverBlocks } from "./discovery/block-loader";
 export type { TraceEntry } from "./logger";
 export { createConsoleLogger, createTracingLogger } from "./logger";
 export type { NodeExecutionRequest, NodeExecutor } from "./router/executor";

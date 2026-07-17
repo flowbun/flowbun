@@ -19,7 +19,16 @@ export type FlowStatus =
       stillRunning: boolean;
       pid?: number;
     }
-  | { kind: "crash-looped"; at: number; attempts: number };
+  // Distinct from failed-typecheck: assembleFlow() rejected the wiring
+  // outright (unknown node, unknown port, ...) before tsc ever ran -- e.g. a
+  // wire referencing a port a block no longer exposes. Never started, so
+  // there's no "stillRunning" concept for it.
+  | { kind: "failed-load"; at: number; output: string }
+  | { kind: "crash-looped"; at: number; attempts: number }
+  // The flow's own wiring has `disabled: true` — never spawned a
+  // flow-host subprocess (or had its existing one stopped) on purpose, not
+  // as the result of any failure. See main.ts's applyRunState.
+  | { kind: "disabled" };
 
 export interface WiringPosition {
   x: number;
@@ -207,6 +216,15 @@ export type WiringMutation =
   | { op: "node.config"; nodeId: string; config: unknown }
   | { op: "node.position"; nodeId: string; position: WiringPosition }
   | { op: "node.disabled"; nodeId: string; disabled: boolean }
+  // Whole-flow equivalent of node.disabled — see WiringSchema.disabled's own
+  // doc comment for why this one actually stops/starts a subprocess rather
+  // than just being a router-level no-op.
+  | { op: "flow.disabled"; disabled: boolean }
+  // Renames a node's id (the wires/canvas display name) -- every wire
+  // endpoint referencing it is rewritten in the same mutation, so the flow
+  // never passes through a state where a wire points at a node id that no
+  // longer exists.
+  | { op: "node.rename"; nodeId: string; newNodeId: string }
   | { op: "wire.add"; from: string; to: string } // "nodeId.port" refs, per parsePortRef
   | { op: "wire.remove"; from: string; to: string }
   // Retargets one end (or both) of an existing wire to a different port on

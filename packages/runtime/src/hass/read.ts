@@ -27,11 +27,12 @@ export default defineBlock<
 });
 
 /**
- * The actual effect: read one entity's current state+attributes from HA,
- * against this Worker's own independent connection (see hass/client.ts's
- * getHass() — one per flow-host process, not shared). Always runs for real
- * regardless of isDryRun() — a read never touches real devices, so there's
- * nothing to gate.
+ * The actual effect: read one entity's current state+attributes from HA, via
+ * whichever connection readEntityState() resolves to for this thread — the
+ * flow's single real connection if called directly, or a relay to it if
+ * called from a node's Worker (see hass/client.ts's setHassReadTransport).
+ * Always runs for real regardless of isDryRun() — a read never touches real
+ * devices, so there's nothing to gate.
  */
 export async function performHassRead(
   entity: string,

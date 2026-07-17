@@ -43,6 +43,16 @@ export interface WsServerDeps {
    * path itself auto-commits via the snapshotting serializer in main.ts;
    * this is only ever read from here, never written to directly. */
   gitSnapshotter: GitSnapshotter;
+  /** Restores a wiring file AND every file-backed block it references,
+   * together, from the same historical commit — see history.restore below.
+   * Rolls back to the exact prior content of everything it touched if the
+   * reconstructed set doesn't actually work. */
+  restoreFlow: (
+    file: string,
+    hash: string,
+  ) => Promise<
+    { ok: true; typecheck: TypecheckOutcome } | { ok: false; error: string }
+  >;
   getPalette: () => BlockPaletteEntry[];
   reloadWiringFile: (path: string, label?: string) => Promise<TypecheckOutcome>;
   reloadBlocksAndRestartAll: (label?: string) => Promise<TypecheckOutcome>;
@@ -511,20 +521,71 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             break;
           }
           case "history.restore": {
-            try {
-              const subdir = msg.kind === "wiring" ? "wiring" : "blocks";
+            if (msg.kind === "wiring") {
               // A wiring restore only rewrites an *active* flow's content —
               // resurrecting a fully-deleted flow would leave it stuck at
               // "starting" forever, since supervisor.restartFlow() is a
               // no-op for a flow it was never told to start (see
               // supervisor.ts). Recreating via "+ Flow" is the supported
               // path for a flow that's actually gone.
-              if (msg.kind === "wiring" && !deps.flows.has(msg.file)) {
-                throw new WiringWriteError(
-                  `flow "${msg.file}" no longer exists — recreate it via "+ Flow" first`,
-                );
+              if (!deps.flows.has(msg.file)) {
+                reply({
+                  type: "history.restoreResult",
+                  requestId: msg.requestId,
+                  ok: false,
+                  error: `flow "${msg.file}" no longer exists — recreate it via "+ Flow" first`,
+                });
+                break;
               }
-              const relPath = join(subdir, msg.file);
+              // Restores the wiring together with every file-backed block
+              // it references, from the same commit, rolling back
+              // everything it touched if the reconstructed set doesn't
+              // actually work — see restoreFlow's own doc comment in
+              // main.ts for why a wiring-only restore isn't safe.
+              //
+              // Wrapped defensively even though restoreFlow is designed to
+              // always resolve rather than throw: an uncaught exception
+              // anywhere in this call chain has twice now escaped all the
+              // way up and crashed the entire coordinator process (killing
+              // every other flow along with it), so this boundary — the
+              // one place nothing after it could catch it — doesn't get to
+              // assume that can't happen a third time.
+              try {
+                const result = await deps.restoreFlow(msg.file, msg.hash);
+                reply(
+                  result.ok
+                    ? {
+                        type: "history.restoreResult",
+                        requestId: msg.requestId,
+                        ok: true,
+                        typecheck: result.typecheck,
+                      }
+                    : {
+                        type: "history.restoreResult",
+                        requestId: msg.requestId,
+                        ok: false,
+                        error: result.error,
+                      },
+                );
+              } catch (err) {
+                reply({
+                  type: "history.restoreResult",
+                  requestId: msg.requestId,
+                  ok: false,
+                  error: `unexpected error restoring "${msg.file}": ${err}`,
+                });
+              }
+              break;
+            }
+            // Blocks kind: restores just the one source file's history —
+            // a narrower, single-file feature (e.g. from the block
+            // editor's own history panel), distinct from restoreFlow()
+            // above. A block on its own has no "wiring" to go out of sync
+            // with; reloadBlocksAndRestartAll() already refuses to restart
+            // any flow this would break (see its own doc comment) rather
+            // than leaving something broken running.
+            try {
+              const relPath = join("blocks", msg.file);
               const content = await deps.gitSnapshotter.readFileAt(
                 msg.hash,
                 relPath,
@@ -534,14 +595,11 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                   `"${msg.file}" had no content at ${msg.hash.slice(0, 7)}`,
                 );
               }
-              const path = join(deps.dataDir, subdir, msg.file);
+              const path = join(deps.dataDir, "blocks", msg.file);
               writeFileSync(path, content);
               deps.markSelfWrite(path);
               const label = `restore ${msg.file} to ${msg.hash.slice(0, 7)}`;
-              const typecheck =
-                msg.kind === "wiring"
-                  ? await deps.reloadWiringFile(path, label)
-                  : await deps.reloadBlocksAndRestartAll(label);
+              const typecheck = await deps.reloadBlocksAndRestartAll(label);
               await deps.undoStack.recordEdit(relPath);
               reply({
                 type: "history.restoreResult",

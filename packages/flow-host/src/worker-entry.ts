@@ -1,5 +1,8 @@
 import type { AnyBlockDef, BlockContext } from "flowbun";
 import { blockScopeKey, makeStateScope, openStateDb } from "flowbun";
+import { setHassCallTransport } from "flowbun/hass/action";
+import type { EntityStateReading } from "flowbun/hass/client";
+import { setHassReadTransport } from "flowbun/hass/client";
 import type { FlowHostToWorker, WorkerToFlowHost } from "flowbun/ipc";
 
 let blockDef: AnyBlockDef | undefined;
@@ -10,6 +13,41 @@ let unsubscribe: (() => void) | undefined;
 function post(msg: WorkerToFlowHost): void {
   postMessage(msg);
 }
+
+// This Worker has no Home Assistant connection of its own — the flow's one
+// real connection lives in the flow-host's main thread (see
+// hass/client.ts's setHassReadTransport doc comment). Every block loaded
+// into this Worker (whether it's @hass/read/@hass/action themselves, or an
+// ordinary block like battery_controller that calls readEntityState()/
+// performHassAction() directly) gets relayed through these two, installed
+// once here rather than per-block.
+let nextHassRequestId = 1;
+const pendingHassReads = new Map<
+  number,
+  { resolve: (r: EntityStateReading | undefined) => void }
+>();
+const pendingHassCalls = new Map<
+  number,
+  { resolve: () => void; reject: (e: Error) => void }
+>();
+
+setHassReadTransport({
+  readEntity: (entity) =>
+    new Promise((resolve) => {
+      const requestId = nextHassRequestId++;
+      pendingHassReads.set(requestId, { resolve });
+      post({ type: "hass.read", requestId, entity });
+    }),
+});
+
+setHassCallTransport({
+  call: (call, dryRun) =>
+    new Promise((resolve, reject) => {
+      const requestId = nextHassRequestId++;
+      pendingHassCalls.set(requestId, { resolve, reject });
+      post({ type: "hass.call", requestId, call, dryRun });
+    }),
+});
 
 const log = {
   debug: (msg: string, meta?: Record<string, unknown>) =>
@@ -103,5 +141,20 @@ addEventListener("message", async (event: MessageEvent<FlowHostToWorker>) => {
     case "terminate":
       unsubscribe?.();
       break;
+    case "hass.read.result": {
+      const pending = pendingHassReads.get(msg.requestId);
+      if (!pending) return;
+      pendingHassReads.delete(msg.requestId);
+      pending.resolve(msg.reading);
+      break;
+    }
+    case "hass.call.result": {
+      const pending = pendingHassCalls.get(msg.requestId);
+      if (!pending) return;
+      pendingHassCalls.delete(msg.requestId);
+      if (msg.ok) pending.resolve();
+      else pending.reject(new Error(msg.error));
+      break;
+    }
   }
 });

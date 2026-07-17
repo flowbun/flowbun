@@ -24,27 +24,59 @@ export function ConfigEditor({
   onClose,
   onDelete,
   onOpenBlockEditor,
+  onRename,
 }: {
   nodeId: string;
   block: string;
   config: unknown;
   def: BlockPaletteEntry | undefined;
   disabled: boolean;
-  onToggleDisabled: (next: boolean) => void;
-  onSave: (config: unknown) => void;
+  onToggleDisabled: (next: boolean) => Promise<{ ok: boolean; error?: string }>;
+  onSave: (config: unknown) => Promise<{ ok: boolean; error?: string }>;
   onClose: () => void;
-  onDelete: () => void;
+  onDelete: () => Promise<{ ok: boolean; error?: string }>;
   onOpenBlockEditor: (blockFile: string) => void;
+  onRename: (newNodeId: string) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const defaultConfig = def?.defaultConfig;
   const base = (config ?? defaultConfig ?? {}) as Record<string, unknown>;
   const template = (defaultConfig ?? {}) as Record<string, unknown>;
   const [values, setValues] = useState<Record<string, unknown>>(base);
   const [hassEntities, setHassEntities] = useState<HassEntitySummary[]>([]);
+  const [mutationError, setMutationError] = useState<string | null>(null);
   const { send } = useFlowbunSocket();
+
+  // useState(base)'s initializer only runs on mount -- without this, the
+  // form silently kept showing whatever was true at that moment forever
+  // after, even once `config`/`def` changed underneath it (e.g. a block's
+  // own default config shape changing after a code edit + blocks reload,
+  // or a wiring.mutate from another tab/agent). Deliberately overwrites
+  // any in-progress unsaved edits when it fires -- this panel mirrors live
+  // external state rather than owning a separate draft, same as every
+  // other write in this app (HA de-dupes/reflects reality, not "what I
+  // last typed"). Switching to a *different* node is handled separately,
+  // by remounting this component entirely (see its `key` in App.tsx) --
+  // this effect only needs to cover the same-node case.
+  useEffect(() => {
+    setValues((config ?? def?.defaultConfig ?? {}) as Record<string, unknown>);
+  }, [config, def]);
 
   function setField(key: string, value: unknown) {
     setValues((v) => ({ ...v, [key]: value }));
+  }
+
+  // Every mutation prop below returns {ok, error?} rather than being
+  // fire-and-forget — a failed wiring.mutate (e.g. the node.disabled toggle
+  // this wraps) used to be silently discarded here, so a click that looked
+  // like it worked in the UI could leave the actual running flow completely
+  // unchanged with no indication anything went wrong. See ws-server.ts's
+  // wiring.mutate handler, which always replies with ok/error either way.
+  async function runMutation(
+    fn: () => Promise<{ ok: boolean; error?: string }>,
+  ) {
+    const result = await fn();
+    setMutationError(result.ok ? null : (result.error ?? "mutation failed"));
+    return result;
   }
 
   const wantsHassEntities = HASS_ENTITY_FIELD_BLOCKS.has(block);
@@ -76,7 +108,29 @@ export function ConfigEditor({
     <div className="node-config-panel">
       <div className="node-config-header">
         <div>
-          <strong>{nodeId}</strong>
+          <input
+            key={nodeId}
+            type="text"
+            className="node-config-id-input"
+            defaultValue={nodeId}
+            aria-label="Node name"
+            title="Node name — also the display label used on the canvas and in wires"
+            onBlur={(e) => {
+              const next = e.target.value.trim();
+              if (!next || next === nodeId) {
+                e.target.value = nodeId; // revert: empty or unchanged
+                return;
+              }
+              runMutation(() => onRename(next));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                e.currentTarget.value = nodeId;
+                e.currentTarget.blur();
+              }
+            }}
+          />
           <div className="node-config-block">{block}</div>
         </div>
         <div className="node-config-header-actions">
@@ -100,10 +154,18 @@ export function ConfigEditor({
         <input
           type="checkbox"
           checked={!disabled}
-          onChange={(e) => onToggleDisabled(!e.target.checked)}
+          onChange={(e) =>
+            runMutation(() => onToggleDisabled(!e.target.checked))
+          }
         />
         {disabled ? "Disabled" : "Enabled"}
       </label>
+
+      {mutationError && (
+        <div className="node-config-error" role="alert">
+          {mutationError}
+        </div>
+      )}
 
       <div className="node-config-section">
         <h4>Ports</h4>
@@ -192,11 +254,15 @@ export function ConfigEditor({
         <button
           type="button"
           className="node-config-save"
-          onClick={() => onSave(values)}
+          onClick={() => runMutation(() => onSave(values))}
         >
           Save
         </button>
-        <button type="button" className="node-config-delete" onClick={onDelete}>
+        <button
+          type="button"
+          className="node-config-delete"
+          onClick={() => runMutation(onDelete)}
+        >
           Delete node
         </button>
       </div>

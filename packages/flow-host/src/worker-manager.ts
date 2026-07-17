@@ -1,5 +1,7 @@
 import { join } from "node:path";
 import type { LoadedFlow, LoadedNode, Logger, Router } from "flowbun";
+import { performHassAction } from "flowbun/hass/action";
+import { readEntityState } from "flowbun/hass/client";
 import type { FlowHostToWorker, WorkerToFlowHost } from "flowbun/ipc";
 
 const WORKER_INIT_TIMEOUT_MS = 5_000;
@@ -21,16 +23,27 @@ interface Pending {
 }
 
 /**
- * One persistent Worker per ordinary (non-@ai/agent) node, spawned once in
- * startAll() and kept alive for the flow-host's whole lifetime — never
- * per-message. This is the concrete mitigation for S1's flagged RSS-growth
- * risk: that spike stress-tested rapid repeated spawn/terminate, which this
- * design never does (a worker is only recreated on its own crash/hang, or
- * when the whole flow-host restarts). @hass/action/@hass/read/@hass/trigger
- * nodes get a Worker like any other node now — each opens its own direct
- * Home Assistant connection (see hass/client.ts's getHass()), independent of
- * every other flow-host's. Only @ai/agent stays IPC-relayed to the
- * coordinator, which is the only process holding Claude credentials.
+ * One persistent Worker per ordinary (non-@ai/agent, non-@hass/trigger)
+ * node, spawned once in startAll() and kept alive for the flow-host's whole
+ * lifetime — never per-message. This is the concrete mitigation for S1's
+ * flagged RSS-growth risk: that spike stress-tested rapid repeated
+ * spawn/terminate, which this design never does (a worker is only recreated
+ * on its own crash/hang, or when the whole flow-host restarts).
+ *
+ * A flow owns exactly one real Home Assistant connection, not one per node:
+ * it's opened lazily, right here in the flow-host's own main thread, the
+ * first time this class actually calls readEntityState()/performHassAction()
+ * below — not inside any Worker. @hass/action/@hass/read nodes (and any
+ * ordinary block, like battery_controller, that calls readEntityState()/
+ * performHassAction() directly) still get a Worker like any other node, but
+ * that Worker has no connection of its own — it relays "hass.read"/
+ * "hass.call" here instead (see hass/client.ts's setHassReadTransport doc
+ * comment, and worker-entry.ts, which installs that relay). @hass/trigger
+ * is handled even more directly: it doesn't get a Worker at all (see
+ * startAll()'s filter below) — flow-host/src/main.ts subscribes it straight
+ * off this same connection, exactly like @core/scheduler's registerScheduler.
+ * Only @ai/agent stays IPC-relayed to the coordinator, which is the only
+ * process holding Claude credentials.
  */
 export class WorkerManager {
   private workers = new Map<string, ManagedWorker>();
@@ -58,7 +71,12 @@ export class WorkerManager {
     const dbPath = join(this.dataDir, "state", "flowbun.sqlite");
     await Promise.all(
       [...this.flow.nodes]
-        .filter(([, n]) => n.block.name !== "@ai/agent" && !n.disabled)
+        .filter(
+          ([, n]) =>
+            n.block.name !== "@ai/agent" &&
+            n.block.name !== "@hass/trigger" &&
+            !n.disabled,
+        )
         .map(([nodeId, node]) => this.spawn(nodeId, node, dbPath)),
     );
   }
@@ -102,6 +120,50 @@ export class WorkerManager {
             return;
           }
           this.router.emitFromSource(managed.nodeId, msg.port, msg.payload);
+        } else if (msg.type === "hass.read") {
+          readEntityState(msg.entity).then(
+            (reading) => {
+              const reply: FlowHostToWorker = {
+                type: "hass.read.result",
+                requestId: msg.requestId,
+                reading,
+              };
+              managed.worker.postMessage(reply);
+            },
+            (err) => {
+              this.log.error("hass.read_failed", {
+                node: managed.nodeId,
+                entity: msg.entity,
+                err: String(err),
+              });
+              const reply: FlowHostToWorker = {
+                type: "hass.read.result",
+                requestId: msg.requestId,
+                reading: undefined,
+              };
+              managed.worker.postMessage(reply);
+            },
+          );
+        } else if (msg.type === "hass.call") {
+          performHassAction(msg.call, msg.dryRun).then(
+            () => {
+              const reply: FlowHostToWorker = {
+                type: "hass.call.result",
+                requestId: msg.requestId,
+                ok: true,
+              };
+              managed.worker.postMessage(reply);
+            },
+            (err) => {
+              const reply: FlowHostToWorker = {
+                type: "hass.call.result",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              };
+              managed.worker.postMessage(reply);
+            },
+          );
         }
       },
     );
