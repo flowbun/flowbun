@@ -130,6 +130,7 @@ declare module "flowbun/hass/action" {
 
   export interface ActionConfig {
     target?: { entity_id: string | string[] };
+    dryRun?: boolean;
   }
 
   export function performHassAction(

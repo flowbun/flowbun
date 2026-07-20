@@ -1,4 +1,5 @@
 import { defineBlock } from "../block";
+import type { SimpleHass } from "./client";
 import { getHass, isDryRun } from "./client";
 
 export interface ActionCall {
@@ -10,6 +11,14 @@ export interface ActionCall {
 
 export interface ActionConfig {
   target?: { entity_id: string | string[] };
+  // Per-node override of the process-wide FLOWBUN_DRY_RUN default (see
+  // isDryRun() in ./client) — lets one flow go live for real testing while
+  // every other flow on the same coordinator stays safely in dry-run.
+  // Typed here (rather than left as an untyped raw wiring-config key) now
+  // that the typecheck gate validates node configs against their block's
+  // declared Config shape (see typecheck/generate.ts) — an untyped
+  // override would be rejected as an excess property.
+  dryRun?: boolean;
 }
 
 /**
@@ -34,6 +43,29 @@ export function setHassCallTransport(
 }
 
 /**
+ * hass.call is DA's own Proxy over whatever services HA actually reported at
+ * boot (see call-proxy.service.mts) — indexing a domain/service that isn't
+ * registered genuinely returns undefined, it's not just a type-level
+ * possibility. Throwing here (rather than the `?.`-chained silent no-op this
+ * replaced) is what makes a typo'd domain/service surface as a real error
+ * instead of a "hass.call" success log for an action that never happened —
+ * this runtime is currently making real, non-dry-run writes to real hardware.
+ */
+export function resolveHassService(
+  hass: SimpleHass,
+  domain: string,
+  service: string,
+): (args?: Record<string, unknown>) => Promise<unknown> {
+  const fn = hass.call[domain]?.[service];
+  if (!fn) {
+    throw new Error(
+      `Home Assistant service "${domain}.${service}" is not available`,
+    );
+  }
+  return fn;
+}
+
+/**
  * The actual effect: given a fully-resolved call (target already merged in
  * by the caller — see below) and a dry-run flag, either no-op or really call
  * hass.call[domain][service](...). Routes through `callTransport` when one's
@@ -49,6 +81,7 @@ export async function performHassAction(
   if (dryRun) return;
   if (callTransport) return callTransport.call(call, dryRun);
   const hass = await getHass();
+  const service = resolveHassService(hass, call.domain, call.service);
   // DA's hass.call proxy sends whatever object we pass verbatim as the
   // websocket message's service_data — there's no separate "target" slot at
   // this layer, unlike HA's newer target-based REST API. Confirmed against
@@ -56,7 +89,7 @@ export async function performHassAction(
   // entity_id directly into the data object (HA's classic convention), not
   // by nesting it under a "target" key — nesting produces a real HA-side
   // "extra keys not allowed @ data['target']" rejection.
-  await hass.call[call.domain]?.[call.service]?.({
+  await service({
     ...(call.data ?? {}),
     ...(call.target?.entity_id ? { entity_id: call.target.entity_id } : {}),
   });
@@ -76,7 +109,7 @@ export default defineBlock<
       ...call,
       target: call.target ?? ctx.config.target,
     };
-    const dryRun = isDryRun();
+    const dryRun = ctx.config.dryRun ?? isDryRun();
 
     await performHassAction(resolved, dryRun);
 
