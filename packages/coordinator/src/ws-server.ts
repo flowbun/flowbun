@@ -82,9 +82,10 @@ export function buildPalette(
 ): BlockPaletteEntry[] {
   return [...registry.entries()].map(([name, entry]) => ({
     name,
-    file: entry.modulePath.startsWith("flowbun/")
-      ? undefined
-      : relative(join(dataDir, "blocks"), entry.modulePath),
+    file:
+      entry.origin === "builtin"
+        ? undefined
+        : relative(join(dataDir, "blocks"), entry.modulePath),
     inputs: Object.fromEntries(
       Object.keys(entry.def.inputs).map((k) => [k, null]),
     ),

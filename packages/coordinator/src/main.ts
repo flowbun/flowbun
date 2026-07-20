@@ -366,7 +366,7 @@ async function main(): Promise<void> {
       // even in the *current* registry (renamed/deleted since) rather than
       // giving up immediately; readFileAt below is the real check.
       const filename =
-        currentEntry && !currentEntry.modulePath.startsWith("flowbun/")
+        currentEntry && currentEntry.origin === "user"
           ? relative(join(DATA_DIR, "blocks"), currentEntry.modulePath)
           : `${blockName}.ts`;
       const relBlock = join("blocks", filename);
@@ -799,7 +799,7 @@ async function main(): Promise<void> {
     // match its filename (see createBlock) — recover it the same way
     // buildPalette does, by recomputing each entry's relative file.
     const blockName = [...registry.entries()].find(([, entry]) => {
-      if (entry.modulePath.startsWith("flowbun/")) return false;
+      if (entry.origin === "builtin") return false;
       return relative(join(DATA_DIR, "blocks"), entry.modulePath) === file;
     })?.[0];
     if (blockName) {

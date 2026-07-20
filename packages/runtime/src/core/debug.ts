@@ -1,5 +1,5 @@
-import { defineBlock } from "../block";
-
+// The block definition itself lives in blocks/core-debug.ts (see its own
+// doc comment) — this file is just the shared serialization helper.
 /**
  * JSON.stringify(undefined) returns the *value* undefined, not the string
  * "undefined" — and throws on bigint/circular input. A debug node's whole
@@ -16,25 +16,3 @@ export function serializeForDebug(value: unknown): string {
     return `<unserializable: ${String(err)}>`;
   }
 }
-
-export default defineBlock<
-  Record<string, never>,
-  { msg: unknown },
-  Record<string, never>
->({
-  name: "@core/debug",
-  config: {},
-  // `unknown`, not a concrete shape — a debug node accepts a wire from any
-  // other block's output port (AssertAssignable<unknown, Src> is trivially
-  // true for every Src in the generated wire-typecheck), same as Node-RED's
-  // debug node taking any msg.
-  inputs: { msg: {} as unknown },
-  outputs: {},
-  async process({ msg }, ctx) {
-    // Logged at "debug" level and under this node's own id (attached
-    // automatically by worker-manager.ts's log relay — see its own comment)
-    // so the editor's Logs panel can filter straight down to just this
-    // node's traffic via the node/level filters.
-    ctx.log.debug(serializeForDebug(msg));
-  },
-});

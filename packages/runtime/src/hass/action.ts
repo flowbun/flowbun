@@ -1,6 +1,5 @@
-import { defineBlock } from "../block";
 import type { SimpleHass } from "./client";
-import { getHass, isDryRun } from "./client";
+import { getHass } from "./client";
 
 export interface ActionCall {
   domain: string;
@@ -94,30 +93,3 @@ export async function performHassAction(
     ...(call.target?.entity_id ? { entity_id: call.target.entity_id } : {}),
   });
 }
-
-export default defineBlock<
-  ActionConfig,
-  { call: ActionCall },
-  Record<string, never>
->({
-  name: "@hass/action",
-  config: {},
-  inputs: { call: {} as ActionCall },
-  outputs: {},
-  async process({ call }, ctx) {
-    const resolved: ActionCall = {
-      ...call,
-      target: call.target ?? ctx.config.target,
-    };
-    const dryRun = ctx.config.dryRun ?? isDryRun();
-
-    await performHassAction(resolved, dryRun);
-
-    ctx.log.info(dryRun ? "hass.dry_run_call" : "hass.call", {
-      domain: resolved.domain,
-      service: resolved.service,
-      target: resolved.target,
-      data: resolved.data,
-    });
-  },
-});

@@ -7,10 +7,16 @@ import { parsePortRef } from "./schema";
 
 export interface BlockRegistryEntry {
   def: AnyBlockDef;
-  /** Import specifier used for typecheck-glue generation, relative to <dataDir>/generated, e.g. "../blocks/debounce" or "flowbun/hass/trigger". */
+  /** Import specifier used for typecheck-glue generation, relative to <dataDir>/generated, e.g. "../blocks/debounce". */
   specifier: string;
-  /** Real, absolute (for user blocks) import()-able path — what a flow-host Worker actually loads. */
+  /** Real, absolute import()-able path — what a flow-host Worker actually loads. */
   modulePath: string;
+  /** "builtin" for a stdlib block (packages/runtime/src/blocks/*.ts, ships
+   * with the runtime) vs "user" for one discovered under <dataDir>/blocks —
+   * both are discovered and registered identically (see
+   * discovery/block-loader.ts); this only records provenance for consumers
+   * that need it, e.g. buildPalette's core-vs-add-on palette split. */
+  origin: "builtin" | "user";
 }
 
 /** Keyed by block name as referenced in wiring JSON, e.g. "debounce" or "@hass/trigger". */

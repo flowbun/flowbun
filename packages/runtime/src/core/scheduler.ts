@@ -1,5 +1,4 @@
 import { getTimes } from "suncalc";
-import { defineBlock } from "../block";
 
 export interface SchedulerConfig {
   mode: "interval" | "dailyTime" | "sunRelative";
@@ -20,25 +19,6 @@ export interface SchedulerConfig {
 export interface SchedulerOutputs {
   fired: { at: number };
 }
-
-export default defineBlock<
-  SchedulerConfig,
-  Record<string, never>,
-  SchedulerOutputs
->({
-  name: "@core/scheduler",
-  kind: "source",
-  config: { mode: "interval", intervalMs: 60_000 },
-  inputs: {},
-  outputs: { fired: {} as SchedulerOutputs["fired"] },
-  // No `hosted: "flow-host"` override — a timer isn't a shared external
-  // resource the way an HA connection is, so this runs in an ordinary
-  // per-node Worker like any other source with a subscribe, via
-  // registerScheduler below.
-  async subscribe(ctx, emit) {
-    return registerScheduler(ctx.config, (payload) => emit("fired", payload));
-  },
-});
 
 /** Next instant `HH:MM` (24h, local time) occurs at or after `now` — today if it hasn't passed yet, else tomorrow. */
 export function nextDailyTime(time: string, now: Date): Date {
@@ -124,14 +104,14 @@ export function nextFireTime(config: SchedulerConfig, now: Date): Date {
 }
 
 /**
- * Called once per node at Worker init (see the block's own `subscribe`
- * above), NOT per message — unlike @hass/trigger's HA connection, a timer
- * isn't a shared external resource, so there's no need to host this in the
- * flow-host's own main thread: each node's Worker just owns its own
- * setTimeout chain. Returns an unsubscribe function that clears the pending
- * timer, called once, at Worker terminate. Kept as a standalone export
- * (rather than inlined into `subscribe`) so the pure scheduling decision
- * (`nextFireTime`, above) and the real setTimeout side effect stay
+ * Called once per node at Worker init (see the block's own `subscribe` in
+ * blocks/core-scheduler.ts), NOT per message — unlike @hass/trigger's HA
+ * connection, a timer isn't a shared external resource, so there's no need
+ * to host this in the flow-host's own main thread: each node's Worker just
+ * owns its own setTimeout chain. Returns an unsubscribe function that clears
+ * the pending timer, called once, at Worker terminate. Kept as a standalone
+ * export (rather than inlined into `subscribe`) so the pure scheduling
+ * decision (`nextFireTime`, above) and the real setTimeout side effect stay
  * separately testable.
  */
 export function registerScheduler(

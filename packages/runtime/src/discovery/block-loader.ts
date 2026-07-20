@@ -1,12 +1,5 @@
 import { join, relative } from "node:path";
-import aiAgent from "../ai/agent";
 import type { AnyBlockDef } from "../block";
-import coreDebug from "../core/debug";
-import coreInject from "../core/inject";
-import coreScheduler from "../core/scheduler";
-import hassAction from "../hass/action";
-import hassRead from "../hass/read";
-import hassTrigger from "../hass/trigger";
 import type { BlockRegistry } from "../wiring/flow-assembly";
 
 function isBlockDef(
@@ -33,57 +26,25 @@ function isBlockDef(
   return d.kind === "source" || d.kind === "relay";
 }
 
-/** Scans `<dataDir>/blocks/*.ts`, dynamic-importing each and registering the seven built-in blocks (`@hass/trigger`, `@hass/action`, `@hass/read`, `@core/scheduler`, `@core/inject`, `@core/debug`, `@ai/agent`). */
-export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
-  const registry: BlockRegistry = new Map();
-  // modulePath is unreachable in practice only for @hass/trigger — the
-  // flow-host never spawns a Worker for it (see WorkerManager.startAll()'s
-  // filter; it's subscribed directly in flow-host/src/main.ts instead).
-  // @hass/action and @hass/read *do* get a Worker like any other node
-  // (worker-entry.ts import()s this exact modulePath for them), so their
-  // modulePath is reachable and load-bearing, not just kept for symmetry.
-  registry.set("@hass/trigger", {
-    def: hassTrigger,
-    specifier: "flowbun/hass/trigger",
-    modulePath: "flowbun/hass/trigger",
-  });
-  registry.set("@hass/action", {
-    def: hassAction,
-    specifier: "flowbun/hass/action",
-    modulePath: "flowbun/hass/action",
-  });
-  registry.set("@core/scheduler", {
-    def: coreScheduler,
-    specifier: "flowbun/core/scheduler",
-    modulePath: "flowbun/core/scheduler",
-  });
-  registry.set("@hass/read", {
-    def: hassRead,
-    specifier: "flowbun/hass/read",
-    modulePath: "flowbun/hass/read",
-  });
-  registry.set("@core/inject", {
-    def: coreInject,
-    specifier: "flowbun/core/inject",
-    modulePath: "flowbun/core/inject",
-  });
-  registry.set("@core/debug", {
-    def: coreDebug,
-    specifier: "flowbun/core/debug",
-    modulePath: "flowbun/core/debug",
-  });
-  registry.set("@ai/agent", {
-    def: aiAgent,
-    specifier: "flowbun/ai/agent",
-    modulePath: "flowbun/ai/agent",
-  });
-
-  const blocksDir = join(dataDir, "blocks");
-  const generatedDir = join(dataDir, "generated");
+/**
+ * Scans every `*.ts` file directly under `dir`, dynamic-importing each and
+ * registering its `defineBlock` default export — shared by both the stdlib
+ * scan and the `<dataDir>/blocks` user scan below, so a built-in block
+ * (packages/runtime/src/blocks/*.ts) is discovered exactly the same way a
+ * user's own block is: no separate registration path, no privileged
+ * shortcut. `origin` only records provenance for consumers that need it
+ * (e.g. the editor's core-vs-add-on palette split); it has no effect on how
+ * the block itself is loaded or run.
+ */
+async function scanBlockDir(
+  dir: string,
+  generatedDir: string,
+  origin: "builtin" | "user",
+  registry: BlockRegistry,
+): Promise<void> {
   const glob = new Bun.Glob("*.ts");
-
-  for await (const file of glob.scan({ cwd: blocksDir })) {
-    const absPath = join(blocksDir, file);
+  for await (const file of glob.scan({ cwd: dir })) {
+    const absPath = join(dir, file);
     // Bun's ES module cache is keyed by the resolved specifier string, not
     // file content or mtime -- a bare `import(absPath)` on the *second*
     // discoverBlocks() call for the same path within one coordinator
@@ -96,7 +57,10 @@ export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
     // shape instead of the just-saved one. A cache-busting query string
     // forces a genuinely fresh read+evaluate every call, matching what
     // every caller here already assumes ("the registry reflects what's on
-    // disk right now").
+    // disk right now"). Built-in blocks never change without a container
+    // rebuild (which starts a fresh process anyway), so this is pure
+    // overhead for them, not a correctness requirement — kept uniform
+    // rather than special-cased for the sake of one branch fewer.
     // A syntactically broken block file (a real possibility mid-edit, or a
     // typo saved by mistake) makes `import()` throw -- previously bare and
     // uncaught here, which took discoverBlocks(), and every one of its
@@ -124,6 +88,19 @@ export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
       );
       continue;
     }
+    const existing = registry.get(mod.default.name);
+    if (existing?.origin === "builtin" && origin === "user") {
+      // The `@hass/*`/`@core/*`/`@ai/*` namespaces are reserved for stdlib
+      // blocks (see this function's own doc comment) — a user block can't
+      // shadow one by reusing its name. Scanning order (stdlib first, see
+      // discoverBlocks below) is what makes this check meaningful: by the
+      // time a user block's own name is checked, every builtin is already
+      // registered.
+      console.error(
+        `[discoverBlocks] ${absPath}: block name "${mod.default.name}" is reserved by a built-in block, skipping it`,
+      );
+      continue;
+    }
     const relSpecifier = relative(generatedDir, absPath).replace(/\.ts$/, "");
     registry.set(mod.default.name, {
       def: mod.default,
@@ -131,8 +108,27 @@ export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
         ? relSpecifier
         : `./${relSpecifier}`,
       modulePath: absPath,
+      origin,
     });
   }
+}
+
+/**
+ * Scans `packages/runtime/src/blocks/*.ts` (the seven built-in blocks —
+ * `@hass/trigger`, `@hass/action`, `@hass/read`, `@core/scheduler`,
+ * `@core/inject`, `@core/debug`, `@ai/agent`) and `<dataDir>/blocks/*.ts`
+ * (everything a user has written), registering both sets through the exact
+ * same scan/import/validate path — see scanBlockDir's own doc comment.
+ */
+export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
+  const registry: BlockRegistry = new Map();
+  const generatedDir = join(dataDir, "generated");
+
+  const stdlibDir = join(import.meta.dir, "..", "blocks");
+  await scanBlockDir(stdlibDir, generatedDir, "builtin", registry);
+
+  const blocksDir = join(dataDir, "blocks");
+  await scanBlockDir(blocksDir, generatedDir, "user", registry);
 
   return registry;
 }
