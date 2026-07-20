@@ -35,6 +35,17 @@ export class InProcessExecutor implements NodeExecutor {
       throw new Error(
         `no such node "${req.nodeId}" in flow "${this.flow.name}"`,
       );
+    // A source or relay block never has its process() called (see
+    // block.ts's SourceBlockDef/RelayBlockDef doc comments) — nothing wires
+    // into a source's empty inputs, and a relay block is dispatched
+    // elsewhere entirely, so execute() should never actually be reached for
+    // either. Guarded rather than assumed, same as worker-entry.ts's own
+    // exec handler in the distributed topology.
+    if (inst.block.kind === "source" || inst.block.kind === "relay") {
+      throw new Error(
+        `block "${inst.block.name}" (kind: "${inst.block.kind}") has no process() to execute`,
+      );
+    }
 
     const ctx: BlockContext = {
       config: inst.config,

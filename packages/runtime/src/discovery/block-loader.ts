@@ -12,15 +12,25 @@ import type { BlockRegistry } from "../wiring/flow-assembly";
 function isBlockDef(
   mod: Record<string, unknown>,
 ): mod is { default: AnyBlockDef } {
-  const def = mod.default as Partial<AnyBlockDef> | undefined;
-  return (
-    typeof def === "object" &&
-    def !== null &&
-    typeof def.name === "string" &&
-    typeof def.process === "function" &&
-    typeof def.inputs === "object" &&
-    typeof def.outputs === "object"
-  );
+  // Deliberately untyped (Record<string, unknown>, not Partial<AnyBlockDef>)
+  // — this validates genuinely untrusted input (whatever a dynamic import()
+  // handed back), and Partial<> over a discriminated union erases the
+  // discriminant's "required"-ness, which defeats exactly the kind-based
+  // narrowing this function needs to do below.
+  const def = mod.default;
+  if (typeof def !== "object" || def === null) return false;
+  const d = def as Record<string, unknown>;
+  if (typeof d.name !== "string") return false;
+  if (typeof d.inputs !== "object" || d.inputs === null) return false;
+  if (typeof d.outputs !== "object" || d.outputs === null) return false;
+  // A transform (the default kind — `kind` omitted or "transform") must have
+  // a real process(); a source or relay never calls process() at all (see
+  // block.ts's SourceBlockDef/RelayBlockDef doc comments), so it's valid
+  // without one.
+  if (d.kind === undefined || d.kind === "transform") {
+    return typeof d.process === "function";
+  }
+  return d.kind === "source" || d.kind === "relay";
 }
 
 /** Scans `<dataDir>/blocks/*.ts`, dynamic-importing each and registering the seven built-in blocks (`@hass/trigger`, `@hass/action`, `@hass/read`, `@core/scheduler`, `@core/inject`, `@core/debug`, `@ai/agent`). */

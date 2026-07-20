@@ -28,10 +28,10 @@ function fakeNode(blockName: string, config: unknown = {}): LoadedNode {
     nodeId: "n1",
     block: {
       name: blockName,
+      kind: "relay",
       config: {},
       inputs: {},
       outputs: {},
-      process: async () => undefined,
     },
     blockSpecifier: blockName,
     blockModulePath: blockName,

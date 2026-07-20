@@ -25,6 +25,12 @@ export interface AgentOutputs {
 
 export default defineBlock<AgentConfig, { prompt: unknown }, AgentOutputs>({
   name: "@ai/agent",
+  // Driven by normal wire delivery on "prompt" like a transform, but never
+  // actually calls process() — this node's real work is relayed to the
+  // coordinator (and onward to the dedicated ai-host process) over IPC;
+  // DistributedExecutor recognizes `kind: "relay"` and dispatches there
+  // instead. See RelayBlockDef's own doc comment in block.ts.
+  kind: "relay",
   config: {
     systemPrompt: "",
     model: "",
@@ -34,13 +40,4 @@ export default defineBlock<AgentConfig, { prompt: unknown }, AgentOutputs>({
   },
   inputs: { prompt: {} as unknown },
   outputs: { result: {} as AgentOutputs["result"] },
-  async process() {
-    // Never actually invoked — like @hass/action/@hass/read, this node's
-    // real work is relayed to the coordinator (and onward to the dedicated
-    // ai-host process) over IPC; DistributedExecutor special-cases this
-    // block name instead of ever calling process(). Exists only so the type
-    // machinery (InputsOf/OutputsOf, the typecheck generator) treats
-    // @ai/agent uniformly with other blocks.
-    return undefined;
-  },
 });

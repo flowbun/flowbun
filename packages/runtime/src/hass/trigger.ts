@@ -20,17 +20,15 @@ export default defineBlock<
   TriggerOutputs
 >({
   name: "@hass/trigger",
+  kind: "source",
+  // The flow's one real Home Assistant connection lives in the flow-host's
+  // own main thread, not in a per-node Worker — see WorkerManager's own doc
+  // comment. flow-host/src/main.ts calls this block's own `subscribe`
+  // directly, in that thread, for every "hosted: flow-host" source.
+  hosted: "flow-host",
   config: { entity: "" },
   inputs: {},
   outputs: { changed: {} as TriggerOutputs["changed"] },
-  async process() {
-    // Trigger nodes are never invoked through normal mailbox delivery — the
-    // flow-host calls router.emitFromSource() directly instead (see its own
-    // doc comment in router.ts for why not ingress()). This exists only so
-    // the type machinery (InputsOf/OutputsOf, the typecheck generator)
-    // treats @hass/trigger uniformly with other blocks.
-    return undefined;
-  },
   async subscribe(ctx, emit) {
     return registerHassTrigger(ctx.config, (payload) =>
       emit("changed", payload),

@@ -18,10 +18,10 @@ import { defineBlock } from "flowbun";
 let unsubscribeCalled = false;
 export default defineBlock({
   name: "@test/fake-source",
+  kind: "source",
   config: {},
   inputs: {},
   outputs: { changed: {} },
-  async process() { return undefined; },
   async subscribe(ctx, emit) {
     const timer = setTimeout(() => emit("changed", { hello: "world" }), 10);
     return () => {

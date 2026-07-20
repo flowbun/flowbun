@@ -27,17 +27,16 @@ export default defineBlock<
   SchedulerOutputs
 >({
   name: "@core/scheduler",
+  kind: "source",
   config: { mode: "interval", intervalMs: 60_000 },
   inputs: {},
   outputs: { fired: {} as SchedulerOutputs["fired"] },
-  async process() {
-    // Scheduler nodes are never invoked through normal mailbox delivery — the
-    // flow-host owns a local timer per node and calls router.emitFromSource()
-    // directly instead (see registerScheduler below and its doc comment).
-    // This exists only so the type machinery (InputsOf/OutputsOf, the
-    // typecheck generator) treats @core/scheduler uniformly with other
-    // blocks — mirrors @hass/trigger's own no-op process().
-    return undefined;
+  // No `hosted: "flow-host"` override — a timer isn't a shared external
+  // resource the way an HA connection is, so this runs in an ordinary
+  // per-node Worker like any other source with a subscribe, via
+  // registerScheduler below.
+  async subscribe(ctx, emit) {
+    return registerScheduler(ctx.config, (payload) => emit("fired", payload));
   },
 });
 
@@ -125,12 +124,15 @@ export function nextFireTime(config: SchedulerConfig, now: Date): Date {
 }
 
 /**
- * Called once per loaded flow at boot for each @core/scheduler node, NOT per
- * message — mirrors registerHassTrigger's shape (hass/trigger.ts), but the
- * timer lives entirely in this process: unlike an HA subscription, a timer
- * isn't a shared external resource, so there's no per-entity dedup needed —
- * each node just owns its own setTimeout chain. Returns an unsubscribe
- * function that clears the pending timer.
+ * Called once per node at Worker init (see the block's own `subscribe`
+ * above), NOT per message — unlike @hass/trigger's HA connection, a timer
+ * isn't a shared external resource, so there's no need to host this in the
+ * flow-host's own main thread: each node's Worker just owns its own
+ * setTimeout chain. Returns an unsubscribe function that clears the pending
+ * timer, called once, at Worker terminate. Kept as a standalone export
+ * (rather than inlined into `subscribe`) so the pure scheduling decision
+ * (`nextFireTime`, above) and the real setTimeout side effect stay
+ * separately testable.
  */
 export function registerScheduler(
   config: SchedulerConfig,

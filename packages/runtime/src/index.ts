@@ -2,11 +2,15 @@ export type {
   AnyBlockDef,
   BlockContext,
   BlockDef,
+  FiringInputs,
   InputsOf,
   Logger,
   OutputsOf,
   PortShape,
+  RelayBlockDef,
+  SourceBlockDef,
   StateScope,
+  TransformBlockDef,
 } from "./block";
 export { defineBlock } from "./block";
 export { discoverBlocks } from "./discovery/block-loader";

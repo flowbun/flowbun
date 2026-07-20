@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { LoadedFlow, Logger, NodeExecutor } from "flowbun";
+import type { BlockContext, LoadedFlow, Logger, NodeExecutor } from "flowbun";
 import {
   assembleFlow,
   discoverBlocks,
@@ -7,11 +7,7 @@ import {
   openStateDb,
   Router,
 } from "flowbun";
-import type { SchedulerConfig } from "flowbun/core/scheduler";
-import { registerScheduler } from "flowbun/core/scheduler";
 import { listHassEntities } from "flowbun/hass/client";
-import type { TriggerConfig } from "flowbun/hass/trigger";
-import { registerHassTrigger } from "flowbun/hass/trigger";
 import type {
   CoordinatorToFlowHost,
   FlowHostToCoordinator,
@@ -75,7 +71,9 @@ async function main(): Promise<void> {
   // everything else is constructed, always before startAll() below spawns
   // any Worker that could possibly emit an "event" — see WorkerManager's
   // own doc comment on setRouter().
-  const workerManager = new WorkerManager(flow, DATA_DIR, logger);
+  const workerManager = new WorkerManager(flow, DATA_DIR, logger, (nodeId) =>
+    send({ type: "node.dead", nodeId }),
+  );
   const executor: NodeExecutor = new DistributedExecutor({
     flow,
     workerManager,
@@ -119,12 +117,12 @@ async function main(): Promise<void> {
           ok: false,
           error: `no such node "${msg.nodeId}"`,
         });
-      } else if (node.block.name !== "@core/inject") {
+      } else if (node.block.kind !== "source" || !node.block.fireable) {
         send({
           type: "flow.fireNode.result",
           requestId: msg.requestId,
           ok: false,
-          error: `node "${msg.nodeId}" is not a @core/inject node`,
+          error: `node "${msg.nodeId}" is not fireable`,
         });
       } else if (node.disabled) {
         send({
@@ -134,8 +132,11 @@ async function main(): Promise<void> {
           error: `node "${msg.nodeId}" is disabled`,
         });
       } else {
+        // "fired" is the fireable-source output-port convention — @core/inject
+        // is the one block that sets `fireable: true` today, and its own
+        // "fired" output port is what this targets.
         router.emitFromSource(msg.nodeId, "fired", { at: Date.now() });
-        logger.info("inject.fired", { node: msg.nodeId });
+        logger.info("node.fired", { node: msg.nodeId });
         send({
           type: "flow.fireNode.result",
           requestId: msg.requestId,
@@ -147,45 +148,56 @@ async function main(): Promise<void> {
     }
   });
 
-  // @hass/trigger nodes get no Worker at all (see WorkerManager.startAll's
-  // filter) — they're handled directly below, right alongside
-  // @core/scheduler, since both are node types the flow-host itself owns
-  // rather than delegating to a per-node Worker.
+  // Sources hosted in this thread (kind: "source", hosted: "flow-host" —
+  // only @hass/trigger today, for the flow's one real HA connection; see
+  // WorkerManager's own doc comment) get no Worker at all (see
+  // WorkerManager.startAll's needsWorker filter). Every other node —
+  // including subscribe-bearing sources like @core/scheduler that don't
+  // need this thread's capabilities — gets a real Worker instead, which is
+  // where its own subscribe() actually runs (see worker-entry.ts's init
+  // handler).
   await workerManager.startAll();
 
   const stopLocalSubscriptions: Array<() => void> = [];
-  const triggerSubscriptions: Array<Promise<void>> = [];
+  const hostedSubscriptions: Array<Promise<void>> = [];
   for (const [nodeId, node] of flow.nodes) {
-    if (node.block.name === "@core/scheduler" && !node.disabled) {
-      // Runs entirely locally — a timer isn't a shared external resource
-      // anything else needs to own, so this never goes over IPC (see
-      // core/scheduler.ts's own doc comment).
-      stopLocalSubscriptions.push(
-        registerScheduler(node.config as SchedulerConfig, (payload) =>
-          router.emitFromSource(nodeId, "fired", payload),
-        ),
-      );
-    } else if (node.block.name === "@hass/trigger" && !node.disabled) {
-      // The flow's one real Home Assistant connection lives here, in the
-      // flow-host's own main thread (see hass/client.ts's
-      // setHassReadTransport doc comment and WorkerManager's own doc
-      // comment) — not in a Worker, so this subscribes directly rather than
-      // going through workerManager.exec(). registerHassTrigger() awaits
-      // getHass() internally, which is what actually opens the connection
-      // the first time any node needs it. Awaited below (not fire-and-
-      // forget) so "ready" isn't sent until every trigger is actually live
-      // — matching the guarantee the old per-node-Worker init used to give
-      // for free via workerManager.startAll()'s own await.
-      triggerSubscriptions.push(
-        registerHassTrigger(node.config as TriggerConfig, (payload) =>
-          router.emitFromSource(nodeId, "changed", payload),
-        ).then((stop) => {
+    if (
+      node.disabled ||
+      node.block.kind !== "source" ||
+      node.block.hosted !== "flow-host" ||
+      !node.block.subscribe
+    ) {
+      continue;
+    }
+    // Calls the block's own subscribe() directly, exactly like
+    // worker-entry.ts does for a Worker-hosted source — just in this
+    // thread instead, since that's where the capability this source needs
+    // (today, always the flow's HA connection) actually lives. Awaited
+    // below (not fire-and-forget) so "ready" isn't sent until every hosted
+    // source is actually live.
+    const ctx: BlockContext = {
+      config: node.config,
+      state: {
+        block: node.blockState,
+        flow: flow.flowState,
+        global: flow.globalState,
+      },
+      log: logger,
+      traceId: "subscribe",
+      seq: 0,
+      port: "",
+    };
+    hostedSubscriptions.push(
+      node.block
+        .subscribe(ctx, (port, payload) =>
+          router.emitFromSource(nodeId, port, payload),
+        )
+        .then((stop) => {
           stopLocalSubscriptions.push(stop);
         }),
-      );
-    }
+    );
   }
-  await Promise.all(triggerSubscriptions);
+  await Promise.all(hostedSubscriptions);
 
   send({ type: "ready", flow: flow.name, nodeIds: [...flow.nodes.keys()] });
   logger.info("flow-host.ready", { pid: process.pid });

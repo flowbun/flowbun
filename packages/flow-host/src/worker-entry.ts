@@ -78,7 +78,7 @@ addEventListener("message", async (event: MessageEvent<FlowHostToWorker>) => {
           flow: makeStateScope(db, "flow", msg.flowName),
           global: makeStateScope(db, "global", ""),
         };
-        if (blockDef.subscribe) {
+        if (blockDef.kind === "source" && blockDef.subscribe) {
           // No triggering input message exists yet at this point — traceId/
           // seq/port are placeholders, meaningless for a subscribe call, kept
           // only so BlockContext stays one uniform shape across every block
@@ -111,6 +111,20 @@ addEventListener("message", async (event: MessageEvent<FlowHostToWorker>) => {
           type: "error",
           requestId: msg.requestId,
           error: "worker not initialized",
+        });
+        return;
+      }
+      // A source or relay block never has process() called — nothing wires
+      // into a source's empty inputs, and a relay block is dispatched
+      // elsewhere entirely (see block.ts's SourceBlockDef/RelayBlockDef doc
+      // comments) — so this should be unreachable in practice. Guarded
+      // rather than assumed, same as InProcessExecutor's own equivalent
+      // check in the Phase 1 in-process topology.
+      if (blockDef.kind === "source" || blockDef.kind === "relay") {
+        post({
+          type: "error",
+          requestId: msg.requestId,
+          error: `block "${blockDef.name}" (kind: "${blockDef.kind}") has no process() to execute`,
         });
         return;
       }

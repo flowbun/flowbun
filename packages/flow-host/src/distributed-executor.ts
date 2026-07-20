@@ -34,11 +34,12 @@ interface PendingAgentCall {
  * setHassReadTransport doc comment, and worker-entry.ts, which installs
  * that relay). @hass/trigger doesn't get a Worker at all — flow-host/src/
  * main.ts subscribes it directly off that same connection, so it never
- * reaches execute() here either. Only @ai/agent is relayed to the
- * coordinator over IPC instead of ever calling its process(): the
- * coordinator (and, onward from there, the dedicated ai-host process) is
- * the only place holding Claude credentials/session state. @core/scheduler
- * never reaches execute() at all (no wire can target its empty inputs).
+ * reaches execute() here either. A `kind: "relay"` block (only @ai/agent
+ * today) is relayed to the coordinator over IPC instead of ever calling its
+ * process(): the coordinator (and, onward from there, the dedicated ai-host
+ * process) is the only place holding Claude credentials/session state.
+ * @core/scheduler never reaches execute() at all (no wire can target its
+ * empty inputs).
  */
 export class DistributedExecutor implements NodeExecutor {
   private pendingAgentCalls = new Map<number, PendingAgentCall>();
@@ -62,7 +63,7 @@ export class DistributedExecutor implements NodeExecutor {
     const node = this.deps.flow.nodes.get(req.nodeId);
     if (!node) throw new Error(`no such node "${req.nodeId}"`);
 
-    if (node.block.name === "@ai/agent") {
+    if (node.block.kind === "relay") {
       const config = node.config as AgentConfig;
       return this.callAgent(node.nodeId, config, req.inputs.prompt);
     }
