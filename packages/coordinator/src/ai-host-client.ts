@@ -55,6 +55,7 @@ export type AiHostChannel = { send: (msg: CoordinatorToAiHost) => void };
 export function spawnAiHost(
   dataDir: string,
   onMessage: (msg: AiHostToCoordinator) => void,
+  onExit?: (exitCode: number | null, signalCode: string | null) => void,
 ): AiHostChannel {
   const mainPath = join(
     import.meta.dir,
@@ -69,6 +70,12 @@ export function spawnAiHost(
     env: { ...Bun.env, FLOWBUN_DATA_DIR: dataDir },
     ipc: (message) => onMessage(message as AiHostToCoordinator),
     stdio: ["ignore", "inherit", "inherit"],
+    // bun-types declares signalCode as `number | null`, but Supervisor's own
+    // spawn() (supervisor.ts) confirmed at runtime it's actually a string
+    // signal name ("SIGTERM"/"SIGKILL") or null — trusting observed
+    // behavior over the stale type declaration here, same as there.
+    onExit: (_subprocess, exitCode, signalCode) =>
+      onExit?.(exitCode, signalCode as unknown as string | null),
   });
   return { send: (msg) => subprocess.send(msg) };
 }
@@ -82,6 +89,7 @@ export interface AiHostClientOptions {
   spawn?: (
     dataDir: string,
     onMessage: (msg: AiHostToCoordinator) => void,
+    onExit?: (exitCode: number | null, signalCode: string | null) => void,
   ) => AiHostChannel;
 }
 
@@ -96,6 +104,11 @@ export interface AiHostClientOptions {
 export function createAiHostClient(opts: AiHostClientOptions): AiHostClient {
   let busy = false;
   let nextRequestId = 1;
+  // Set right before a deliberate stop() so onAiHostExit (below) can tell a
+  // requested shutdown apart from an actual crash — mirrors Supervisor's own
+  // rt.expectingExit flag for flow-hosts (see supervisor.ts's
+  // onExit/shutdownCurrent).
+  let expectingExit = false;
   const pendingNewSession = new Map<
     number,
     (r: { ok: boolean; error?: string }) => void
@@ -114,9 +127,35 @@ export function createAiHostClient(opts: AiHostClientOptions): AiHostClient {
   >();
   const pendingAgentCalls = new Map<number, (r: AgentCallResult) => void>();
 
-  const channel = (opts.spawn ?? spawnAiHost)(opts.dataDir, (msg) =>
-    onMessage(msg),
-  );
+  function spawnChannel(): AiHostChannel {
+    return (opts.spawn ?? spawnAiHost)(opts.dataDir, onMessage, onAiHostExit);
+  }
+
+  let channel = spawnChannel();
+
+  // Unlike Supervisor (one flow-host per flow, with its own crash-loop
+  // backoff/degrade UI), there's exactly one always-on ai-host process, and
+  // no existing "crashed" status to surface anywhere — so this stays
+  // deliberately simpler than Supervisor.onExit. What it must not skip:
+  // resetting `busy`. `busy` is flipped true/false only by the ai-host's own
+  // "chat.busyChanged" messages (see onMessage below); if ai-host dies
+  // mid-response, that message never arrives, and without this handler
+  // `busy` would stay stuck true forever, permanently blocking the chat
+  // panel until the whole coordinator process was restarted.
+  function onAiHostExit(
+    exitCode: number | null,
+    signalCode: string | null,
+  ): void {
+    busy = false;
+    if (expectingExit) {
+      expectingExit = false;
+      return;
+    }
+    console.error(
+      `[coordinator] ai-host crashed (exitCode=${exitCode}, signalCode=${signalCode}) — respawning`,
+    );
+    channel = spawnChannel();
+  }
 
   function send(msg: CoordinatorToAiHost): void {
     channel.send(msg);
@@ -231,6 +270,7 @@ export function createAiHostClient(opts: AiHostClientOptions): AiHostClient {
   }
 
   function stop(): void {
+    expectingExit = true;
     send({ type: "shutdown" });
   }
 

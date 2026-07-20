@@ -1361,6 +1361,48 @@ body {
   color: var(--bg);
 }
 
+/* Login screen (see LoginGate.tsx) — reuses .create-dialog-panel/input/
+   actions for the form chrome; this is the one place with no app content
+   underneath to dim, so it gets its own solid-background full-page wrapper
+   instead of reusing .create-dialog-overlay's translucent one. */
+.login-gate-page {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.login-gate-panel {
+  width: min(320px, 90vw);
+}
+
+.login-gate-field {
+  margin-top: 8px;
+}
+
+.logout-badge {
+  position: fixed;
+  top: 8px;
+  right: 12px;
+  z-index: 90;
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+}
+
+.logout-badge:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 /* History panel (see HistoryPanel.tsx) — reuses .create-dialog-* for the
    overlay/panel/actions chrome, just wider to fit a scrollable commit list. */
 

@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { ServerWebSocket } from "bun";
 import type { BlockRegistry, Wiring } from "flowbun";
+import { isAuthorized } from "flowbun/auth";
 import type {
   BlockPaletteEntry,
   ClientToServer,
@@ -117,10 +118,23 @@ export function startWsServer(port: number, deps: WsServerDeps) {
   const server = Bun.serve({
     port,
     routes: {
-      "/ws": (req, srv) =>
-        srv.upgrade(req)
+      // Opt-in: isAuthorized() is a no-op passthrough unless
+      // FLOWBUN_AUTH_USERNAME/FLOWBUN_AUTH_PASSWORD are both set (see
+      // flowbun/auth's own doc comment) — every existing unauthenticated
+      // deployment keeps working exactly as before. When auth *is*
+      // configured, this is the actual enforcement point: the editor's own
+      // login screen is just UX around getting a valid session token, not a
+      // security boundary in itself, since nothing stops a client from
+      // talking to this port directly (by design — see README's "no
+      // privileged access" principle for the editor).
+      "/ws": (req, srv) => {
+        if (!isAuthorized(req, deps.dataDir)) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        return srv.upgrade(req)
           ? undefined
-          : new Response("expected websocket", { status: 400 }),
+          : new Response("expected websocket", { status: 400 });
+      },
     },
     websocket: {
       open(ws: ServerWebSocket<undefined>) {
@@ -148,6 +162,14 @@ export function startWsServer(port: number, deps: WsServerDeps) {
               const currentText = readFileSync(path, "utf8");
               const nextText = applyMutation(currentText, msg.mutation);
               writeFileSync(path, nextText);
+              // Mark this write as our own *before* the (potentially
+              // queue-delayed — see main.ts's serializeReload comment)
+              // reload below, not after: fs.watch can otherwise fire first
+              // and, finding no recentSelfWrites entry yet, misattribute
+              // this write to an external edit — a redundant second reload
+              // plus a spurious duplicate undo-stack entry for one logical
+              // change. Matches block.write's own already-correct ordering.
+              deps.markSelfWrite(path);
               const typecheck = await deps.reloadWiringFile(
                 path,
                 `${msg.file}: ${describeMutation(msg.mutation)}`,
@@ -195,6 +217,9 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 );
               }
               writeFileSync(path, restoredText);
+              // Same reasoning as wiring.mutate above: mark it before the
+              // reload, not after.
+              deps.markSelfWrite(path);
               const typecheck = await deps.reloadWiringFile(
                 path,
                 `${msg.type}: ${msg.file}`,
@@ -380,21 +405,33 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             break;
           }
           case "flow.fireNode": {
-            const result = await deps.supervisor.fireNode(msg.flow, msg.nodeId);
-            reply(
-              result.ok
-                ? {
-                    type: "flow.fireNodeResult",
-                    requestId: msg.requestId,
-                    ok: true,
-                  }
-                : {
-                    type: "flow.fireNodeResult",
-                    requestId: msg.requestId,
-                    ok: false,
-                    error: result.error ?? "unknown error",
-                  },
-            );
+            try {
+              const result = await deps.supervisor.fireNode(
+                msg.flow,
+                msg.nodeId,
+              );
+              reply(
+                result.ok
+                  ? {
+                      type: "flow.fireNodeResult",
+                      requestId: msg.requestId,
+                      ok: true,
+                    }
+                  : {
+                      type: "flow.fireNodeResult",
+                      requestId: msg.requestId,
+                      ok: false,
+                      error: result.error ?? "unknown error",
+                    },
+              );
+            } catch (err) {
+              reply({
+                type: "flow.fireNodeResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
             break;
           }
           case "flow.create": {

@@ -141,6 +141,17 @@ function poll(
     }
   }
   for (const filename of known.keys()) {
-    if (!seen.has(filename)) known.delete(filename);
+    if (seen.has(filename)) continue;
+    // A file that's vanished from disk is exactly what fs.watch's own
+    // rename event fires for too (node's fs.watch doesn't distinguish
+    // create/modify/delete — see the blocksWatcher/wiringWatcher callbacks
+    // above, which call touch(filename) unconditionally on any event). This
+    // mirrors that: the polling backstop must trigger the same reload path
+    // for a deletion, not just for a content change, or a delete during a
+    // dead fs.watch window is silently never caught by polling either —
+    // contradicting the "never missed for longer than one interval"
+    // guarantee described above.
+    known.delete(filename);
+    touch(filename);
   }
 }

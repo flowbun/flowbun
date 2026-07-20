@@ -18,6 +18,7 @@ interface ManagedWorker {
 }
 
 interface Pending {
+  nodeId: string;
   resolve: (o: Record<string, unknown> | undefined) => void;
   reject: (e: Error) => void;
 }
@@ -172,6 +173,17 @@ export class WorkerManager {
         node: managed.nodeId,
         message: (e as ErrorEvent).message,
       });
+      // Reject any exec() still in flight against this worker before
+      // respawning: each Pending's own reject() clears its exec() timeout
+      // as a side effect, so this also prevents that timeout from firing
+      // ~WORKER_EXEC_TIMEOUT_MS later and calling respawn() a second time
+      // for the same crash (double-counting against MAX_RESPAWNS). Snapshot
+      // into an array first since reject() mutates this.pending mid-loop.
+      for (const [, entry] of [...this.pending]) {
+        if (entry.nodeId === managed.nodeId) {
+          entry.reject(new Error(`worker crashed: ${managed.nodeId}`));
+        }
+      }
       void this.respawn(managed);
     });
   }
@@ -261,6 +273,7 @@ export class WorkerManager {
         void this.respawn(managed);
       }, WORKER_EXEC_TIMEOUT_MS);
       this.pending.set(requestId, {
+        nodeId,
         resolve: (o) => {
           clearTimeout(timer);
           this.pending.delete(requestId);

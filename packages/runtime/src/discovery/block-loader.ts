@@ -23,12 +23,15 @@ function isBlockDef(
   );
 }
 
-/** Scans `<dataDir>/blocks/*.ts`, dynamic-importing each and registering the two built-in @hass/* blocks. */
+/** Scans `<dataDir>/blocks/*.ts`, dynamic-importing each and registering the seven built-in blocks (`@hass/trigger`, `@hass/action`, `@hass/read`, `@core/scheduler`, `@core/inject`, `@core/debug`, `@ai/agent`). */
 export async function discoverBlocks(dataDir: string): Promise<BlockRegistry> {
   const registry: BlockRegistry = new Map();
-  // modulePath is unreachable in practice for these two — the flow-host
-  // never spawns a Worker for @hass/* nodes (see DistributedExecutor) — kept
-  // populated only for symmetry with user blocks.
+  // modulePath is unreachable in practice only for @hass/trigger — the
+  // flow-host never spawns a Worker for it (see WorkerManager.startAll()'s
+  // filter; it's subscribed directly in flow-host/src/main.ts instead).
+  // @hass/action and @hass/read *do* get a Worker like any other node
+  // (worker-entry.ts import()s this exact modulePath for them), so their
+  // modulePath is reachable and load-bearing, not just kept for symmetry.
   registry.set("@hass/trigger", {
     def: hassTrigger,
     specifier: "flowbun/hass/trigger",

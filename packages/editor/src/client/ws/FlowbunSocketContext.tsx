@@ -208,7 +208,12 @@ export function FlowbunSocketProvider({
     chatEvents: [],
   });
   const wsRef = useRef<WebSocket | null>(null);
-  const pending = useRef(new Map<string, (msg: ServerToClient) => void>());
+  const pending = useRef(
+    new Map<
+      string,
+      { resolve: (msg: ServerToClient) => void; reject: (e: Error) => void }
+    >(),
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -230,6 +235,14 @@ export function FlowbunSocketProvider({
       };
       ws.onclose = () => {
         dispatch({ type: "connected", value: false });
+        // Nothing still in flight will ever get a reply on this socket —
+        // reject every pending request now so awaiting callers (Save/
+        // Delete/Rename buttons, the hass-entities fetch, etc.) fail fast
+        // instead of leaking across the reconnect below and hanging forever.
+        for (const { reject } of pending.current.values()) {
+          reject(new Error("connection lost"));
+        }
+        pending.current.clear();
         if (!cancelled) {
           retryDelay = Math.min(retryDelay * 2, 10_000);
           timer = setTimeout(connect, retryDelay);
@@ -238,7 +251,7 @@ export function FlowbunSocketProvider({
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data as string) as ServerToClient;
         if ("requestId" in msg) {
-          pending.current.get(msg.requestId)?.(msg);
+          pending.current.get(msg.requestId)?.resolve(msg);
         } else {
           dispatch({ type: "server", msg });
         }
@@ -254,12 +267,26 @@ export function FlowbunSocketProvider({
   }, []);
 
   const send = useCallback((msg: ClientToServer): Promise<ServerToClient> => {
-    return new Promise((resolve) => {
-      pending.current.set(msg.requestId, (m) => {
-        pending.current.delete(msg.requestId);
-        resolve(m);
+    const ws = wsRef.current;
+    // No live, open socket to send on — reject immediately instead of
+    // registering a pending entry that would never resolve (wsRef.current
+    // being null, or a plain `?.send()`, used to silently no-op here,
+    // leaving every awaiting caller hanging forever with no error).
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("not connected"));
+    }
+    return new Promise((resolve, reject) => {
+      pending.current.set(msg.requestId, {
+        resolve: (m) => {
+          pending.current.delete(msg.requestId);
+          resolve(m);
+        },
+        reject: (e) => {
+          pending.current.delete(msg.requestId);
+          reject(e);
+        },
       });
-      wsRef.current?.send(JSON.stringify(msg));
+      ws.send(JSON.stringify(msg));
     });
   }, []);
 

@@ -74,6 +74,9 @@ export async function wiringMutateHandler(
     const currentText = readFileSync(path, "utf8");
     const nextText = applyMutation(currentText, input.mutation);
     writeFileSync(path, nextText);
+    // Before the reload below, not after — see ws-server.ts's
+    // "wiring.mutate" case for why (same write path, same race).
+    deps.markSelfWrite(path);
     const description = describeMutation(input.mutation);
     const typecheck = await deps.reloadWiringFile(
       path,
@@ -208,34 +211,58 @@ export async function flowReadHandler(
   deps: AgentToolDeps,
   input: { file: string },
 ): Promise<ToolResult> {
-  const entry = deps.flows.get(input.file);
-  if (!entry) {
+  try {
+    const entry = deps.flows.get(input.file);
+    if (!entry) {
+      return {
+        ok: false,
+        summary: `No such flow "${input.file}"`,
+        error: `unknown wiring file "${input.file}"`,
+      };
+    }
+    return { ok: true, summary: JSON.stringify(entry.wiring, null, 2) };
+  } catch (err) {
     return {
       ok: false,
-      summary: `No such flow "${input.file}"`,
-      error: `unknown wiring file "${input.file}"`,
+      summary: `Failed to read flow "${input.file}"`,
+      error: String(err),
     };
   }
-  return { ok: true, summary: JSON.stringify(entry.wiring, null, 2) };
 }
 
 export async function listFlowsHandler(
   deps: AgentToolDeps,
 ): Promise<ToolResult> {
-  const summaries = [...deps.flows.values()].map((e) => ({
-    file: e.file,
-    name: e.wiring.name,
-    nodeCount: Object.keys(e.wiring.nodes).length,
-    wireCount: e.wiring.wires.length,
-    status: e.status.kind,
-  }));
-  return { ok: true, summary: JSON.stringify(summaries, null, 2) };
+  try {
+    const summaries = [...deps.flows.values()].map((e) => ({
+      file: e.file,
+      name: e.wiring.name,
+      nodeCount: Object.keys(e.wiring.nodes).length,
+      wireCount: e.wiring.wires.length,
+      status: e.status.kind,
+    }));
+    return { ok: true, summary: JSON.stringify(summaries, null, 2) };
+  } catch (err) {
+    return {
+      ok: false,
+      summary: "Failed to list flows",
+      error: String(err),
+    };
+  }
 }
 
 export async function listBlocksHandler(
   deps: AgentToolDeps,
 ): Promise<ToolResult> {
-  return { ok: true, summary: JSON.stringify(deps.getPalette(), null, 2) };
+  try {
+    return { ok: true, summary: JSON.stringify(deps.getPalette(), null, 2) };
+  } catch (err) {
+    return {
+      ok: false,
+      summary: "Failed to list blocks",
+      error: String(err),
+    };
+  }
 }
 
 export async function blockReadHandler(

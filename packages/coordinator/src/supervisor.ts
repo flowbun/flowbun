@@ -34,9 +34,15 @@ export class Supervisor {
   // reversed: this is the one coordinator-initiated request/response pair
   // (fireNode), where every other hass.*.call/result pair is flow-host-
   // initiated instead.
+  // Each entry also carries the flowName its request was sent to, so a
+  // dying subprocess's own entries can be picked out and rejected (see
+  // rejectPending()) without touching unrelated flows' in-flight requests.
   private pendingFires = new Map<
     number,
-    (result: { ok: boolean; error?: string }) => void
+    {
+      flowName: string;
+      resolve: (result: { ok: boolean; error?: string }) => void;
+    }
   >();
   private nextFireRequestId = 1;
   // Coordinator-initiated, same shape as pendingFires — this coordinator
@@ -45,11 +51,14 @@ export class Supervisor {
   // running (see queryHassEntities()).
   private pendingEntityQueries = new Map<
     number,
-    (
-      result:
-        | { ok: true; entities: HassEntitySummary[] }
-        | { ok: false; error: string },
-    ) => void
+    {
+      flowName: string;
+      resolve: (
+        result:
+          | { ok: true; entities: HassEntitySummary[] }
+          | { ok: false; error: string },
+      ) => void;
+    }
   >();
   private nextEntityQueryRequestId = 1;
 
@@ -150,10 +159,10 @@ export class Supervisor {
         });
         break;
       case "hass.entities.result": {
-        const resolve = this.pendingEntityQueries.get(msg.requestId);
-        if (!resolve) break;
+        const pending = this.pendingEntityQueries.get(msg.requestId);
+        if (!pending) break;
         this.pendingEntityQueries.delete(msg.requestId);
-        resolve(
+        pending.resolve(
           msg.ok
             ? { ok: true, entities: msg.entities }
             : { ok: false, error: msg.error },
@@ -161,10 +170,12 @@ export class Supervisor {
         break;
       }
       case "flow.fireNode.result": {
-        const resolve = this.pendingFires.get(msg.requestId);
-        if (!resolve) break;
+        const pending = this.pendingFires.get(msg.requestId);
+        if (!pending) break;
         this.pendingFires.delete(msg.requestId);
-        resolve(msg.ok ? { ok: true } : { ok: false, error: msg.error });
+        pending.resolve(
+          msg.ok ? { ok: true } : { ok: false, error: msg.error },
+        );
         break;
       }
       case "agent.call":
@@ -206,11 +217,33 @@ export class Supervisor {
     }
   }
 
+  /** Rejects (and removes) every pendingFires/pendingEntityQueries entry
+   * that was sent to this flow's now-dead subprocess — otherwise a
+   * flow.fireNode or entity-query request racing a crash (or even a
+   * deliberate restart/stop, since this subprocess is gone either way)
+   * hangs forever with no reply ever sent back to the browser. Called from
+   * onExit(), which fires whenever the subprocess actually exits,
+   * regardless of whether that exit was expected. */
+  private rejectPending(rt: FlowRuntime): void {
+    const error = "flow-host exited before responding";
+    for (const [id, pending] of this.pendingFires) {
+      if (pending.flowName !== rt.flowName) continue;
+      this.pendingFires.delete(id);
+      pending.resolve({ ok: false, error });
+    }
+    for (const [id, pending] of this.pendingEntityQueries) {
+      if (pending.flowName !== rt.flowName) continue;
+      this.pendingEntityQueries.delete(id);
+      pending.resolve({ ok: false, error });
+    }
+  }
+
   private onExit(
     rt: FlowRuntime,
     exitCode: number | null,
     signalCode: string | null,
   ): void {
+    this.rejectPending(rt);
     if (rt.expectingExit) {
       rt.expectingExit = false;
       return;
@@ -306,7 +339,7 @@ export class Supervisor {
       nodeId,
     } satisfies CoordinatorToFlowHost);
     return new Promise((resolve) => {
-      this.pendingFires.set(requestId, resolve);
+      this.pendingFires.set(requestId, { flowName: rt.flowName, resolve });
     });
   }
 
@@ -329,9 +362,10 @@ export class Supervisor {
       requestId,
     } satisfies CoordinatorToFlowHost);
     return new Promise((resolve) => {
-      this.pendingEntityQueries.set(requestId, (result) =>
-        resolve(result.ok ? result.entities : []),
-      );
+      this.pendingEntityQueries.set(requestId, {
+        flowName: rt.flowName,
+        resolve: (result) => resolve(result.ok ? result.entities : []),
+      });
     });
   }
 

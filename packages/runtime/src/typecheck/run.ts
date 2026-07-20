@@ -66,6 +66,8 @@ export async function runTypecheck(
         "flowbun/core/scheduler": [`${runtimeSrcRel}/core/scheduler.ts`],
         "flowbun/core/inject": [`${runtimeSrcRel}/core/inject.ts`],
         "flowbun/core/debug": [`${runtimeSrcRel}/core/debug.ts`],
+        "flowbun/ai/agent": [`${runtimeSrcRel}/ai/agent.ts`],
+        "flowbun/auth": [`${runtimeSrcRel}/auth/session.ts`],
       },
     },
     files: ["wires.check.ts"],

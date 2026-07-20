@@ -1,5 +1,3 @@
-import { QuickBoot } from "@digital-alchemy/hass";
-
 /**
  * DA's entity-id and service-call types only become useful (specific string
  * literals instead of an empty mapping) once `type-writer` has generated
@@ -47,10 +45,15 @@ export interface EntityStateReading {
 
 let hassPromise: Promise<SimpleHass> | null = null;
 
+// Dynamic import rather than a top-level one: this pulls in the whole
+// @digital-alchemy/hass dependency graph, which only the flow-host's main
+// thread ever actually needs (see setHassReadTransport's doc comment below —
+// every per-node Worker installs a transport instead and never reaches this
+// branch). A static import would pay that load cost in every Worker too.
 export function getHass(): Promise<SimpleHass> {
   if (!hassPromise) {
-    hassPromise = QuickBoot("flowbun").then(
-      (app) => app.hass as unknown as SimpleHass,
+    hassPromise = import("@digital-alchemy/hass").then(({ QuickBoot }) =>
+      QuickBoot("flowbun").then((app) => app.hass as unknown as SimpleHass),
     );
   }
   return hassPromise;

@@ -26,14 +26,19 @@ interface PendingAgentCall {
 }
 
 /**
- * The flow-host's NodeExecutor: ordinary nodes — including @hass/action,
- * @hass/read, and @hass/trigger, each with its own independent Home
- * Assistant connection — go to a persistent Worker (WorkerManager). Only
- * @ai/agent is relayed to the coordinator over IPC instead of ever calling
- * its process(): the coordinator (and, onward from there, the dedicated
- * ai-host process) is the only place holding Claude credentials/session
- * state. @core/scheduler never reaches execute() at all (no wire can target
- * its empty inputs).
+ * The flow-host's NodeExecutor: ordinary nodes — including @hass/action and
+ * @hass/read — go to a persistent Worker (WorkerManager). A flow owns
+ * exactly one real Home Assistant connection, held in the flow-host's main
+ * thread; each Worker has no connection of its own and instead relays
+ * "hass.read"/"hass.call" back to it (see hass/client.ts's
+ * setHassReadTransport doc comment, and worker-entry.ts, which installs
+ * that relay). @hass/trigger doesn't get a Worker at all — flow-host/src/
+ * main.ts subscribes it directly off that same connection, so it never
+ * reaches execute() here either. Only @ai/agent is relayed to the
+ * coordinator over IPC instead of ever calling its process(): the
+ * coordinator (and, onward from there, the dedicated ai-host process) is
+ * the only place holding Claude credentials/session state. @core/scheduler
+ * never reaches execute() at all (no wire can target its empty inputs).
  */
 export class DistributedExecutor implements NodeExecutor {
   private pendingAgentCalls = new Map<number, PendingAgentCall>();

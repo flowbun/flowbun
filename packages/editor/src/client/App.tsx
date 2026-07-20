@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { LoginGate } from "./components/Auth/LoginGate";
 import { MonacoBlockEditor } from "./components/BlockEditor/MonacoBlockEditor";
 import { FlowCanvas } from "./components/Canvas/FlowCanvas";
 import { ChatPanel } from "./components/ChatPanel/ChatPanel";
@@ -457,8 +458,10 @@ function Shell() {
 
 export function App() {
   return (
-    <FlowbunSocketProvider>
-      <Shell />
-    </FlowbunSocketProvider>
+    <LoginGate>
+      <FlowbunSocketProvider>
+        <Shell />
+      </FlowbunSocketProvider>
+    </LoginGate>
   );
 }

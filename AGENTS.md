@@ -27,10 +27,17 @@ into the Docker image.
   to `data/blocks/`/`data/wiring/` as something that will immediately issue
   real service calls once reloaded, not a no-op you can casually try.
 - Never print, `cat`, or otherwise surface `.env` — it holds a long-lived
-  `HASS_TOKEN`. If you need to check a variable's value, `grep` for the key
-  name and redact the value, or better, check `docker exec <container>
-  printenv <VAR>` for a single non-secret variable instead of dumping the
-  whole file.
+  `HASS_TOKEN`, and possibly `FLOWBUN_AUTH_PASSWORD` (see below). If you need
+  to check a variable's value, `grep` for the key name and redact the value,
+  or better, check `docker exec <container> printenv <VAR>` for a single
+  non-secret variable instead of dumping the whole file.
+- The coordinator's `flowbun/ws` control API (port `8787`) can write and
+  execute arbitrary `data/blocks/*.ts`, run arbitrary SQL against the state
+  DB, and rewrite any flow's wiring — it has no login by default. Set
+  `FLOWBUN_AUTH_USERNAME`/`FLOWBUN_AUTH_PASSWORD` to require one (see
+  README's "Optional authentication" section, and `flowbun/auth`) before
+  that port is reachable from anywhere you wouldn't trust with shell access
+  to this host.
 
 ## `data/` hot-reloads — do not rebuild Docker for a `data/`-only change
 
@@ -117,10 +124,12 @@ three separate jobs — matches the commands above exactly.
 
 ## Architecture cheat sheet
 
-- **Coordinator**: light-touch. Never holds a Home Assistant connection.
-  Supervises flow-host processes (spawn/restart/backoff/crash-loop),
+- **Coordinator**: light-touch. Never holds a Home Assistant connection, and
+  never talks to the Claude Agent SDK directly either. Supervises flow-host
+  *and* `ai-host` child processes (spawn/restart/backoff/crash-loop),
   watches `data/` for reloadable edits, typechecks, serves the `flowbun/ws`
-  control API and the embedded chat agent's tools.
+  control API, and implements the tool handlers the embedded chat agent
+  calls back into over IPC.
 - **Flow-host**: one process per flow, owns that flow's *one* real HA
   connection (opened lazily). `@hass/trigger` nodes are subscribed directly
   in the flow-host's main thread (no Worker); every other node gets its own
@@ -128,8 +137,16 @@ three separate jobs — matches the commands above exactly.
   reads/calls back to its flow-host's connection over a small postMessage
   protocol (`setHassReadTransport`/`setHassCallTransport` in
   `hass/client.ts`/`hass/action.ts`, answered by `worker-manager.ts`).
+- **ai-host**: a separate process (`packages/ai-host`), spawned by the
+  coordinator, holding the actual Claude Agent SDK `query()` loop, MCP
+  server, session transcripts, and OAuth credentials — the coordinator only
+  relays tool calls to/from it over IPC (`ai-host-client.ts`).
 - **Router**: single-concurrency drain per flow (`packages/runtime/src/router/router.ts`)
   — one node executes at a time within a flow; a burst of trigger events
   queues rather than running concurrently.
+- **Auth** (`flowbun/auth`, `packages/runtime/src/auth/session.ts`): opt-in
+  username/password + long-lived JWT session, shared by the coordinator's
+  `/ws` upgrade and the editor's `/api/login`/`/api/session`. A no-op unless
+  `FLOWBUN_AUTH_USERNAME`/`FLOWBUN_AUTH_PASSWORD` are both set.
 - Full detail and the reasoning behind each of these: README.md's
   "Architecture decisions, and why" section.
