@@ -64,6 +64,25 @@ export function resolveHassService(
   return fn;
 }
 
+// DA's own ack for a call_service message is sometimes lost even though HA
+// has already carried out the command — observed against
+// cover.set_cover_position on cover.living_room_blinds (data/wiring/
+// blinds_sun_tracker.json): DA logs its own "[hass:socket] (waitForReply):
+// sent message, did not receive reply" warning and the service() promise
+// never settles, despite the blind actually moving. Left unbounded, that
+// hang is what used to resolve the situation in practice — WorkerManager's
+// WORKER_EXEC_TIMEOUT_MS (flow-host/src/worker-manager.ts) would eventually
+// kill and respawn the node's Worker, and repeated respawns tripped the
+// flow into "degraded" every few minutes. HASS_CALL_ACK_TIMEOUT_MS is kept
+// comfortably under that 10s exec timeout so a lost ack resolves quietly
+// here first, before it ever reaches WorkerManager's harder kill-and-respawn
+// path.
+const HASS_CALL_ACK_TIMEOUT_MS = 8_000;
+
+function ackTimeout(ms: number): Promise<"ack-timeout"> {
+  return new Promise((resolve) => setTimeout(() => resolve("ack-timeout"), ms));
+}
+
 /**
  * The actual effect: given a fully-resolved call (target already merged in
  * by the caller — see below) and a dry-run flag, either no-op or really call
@@ -71,7 +90,8 @@ export function resolveHassService(
  * installed (a node's Worker); otherwise calls straight out over this
  * thread's own `getHass()` connection. Deliberately has no logging of its
  * own — the caller (this file's own process(), below) logs, since it's the
- * one with a Logger/trace context in scope.
+ * one with a Logger/trace context in scope; DA's own socket layer already
+ * logs the lost-ack warning that ackTimeout below is racing against.
  */
 export async function performHassAction(
   call: ActionCall,
@@ -88,8 +108,12 @@ export async function performHassAction(
   // entity_id directly into the data object (HA's classic convention), not
   // by nesting it under a "target" key — nesting produces a real HA-side
   // "extra keys not allowed @ data['target']" rejection.
-  await service({
+  const invocation = service({
     ...(call.data ?? {}),
     ...(call.target?.entity_id ? { entity_id: call.target.entity_id } : {}),
   });
+  // A late settlement past the race below must not become an unhandled
+  // rejection — we've already moved on by then.
+  invocation.catch(() => {});
+  await Promise.race([invocation, ackTimeout(HASS_CALL_ACK_TIMEOUT_MS)]);
 }

@@ -8,10 +8,13 @@ services:
       - "8787:8787"
     volumes:
       - ./data:/app/data
+      # Sibling checkout of flowbun-registry, mounted read-only so the
+      # coordinator's flowbun-package installer (FLOWBUN_REGISTRY_URL below)
+      # can browse/install from it before it's pushed to GitHub.
+      - ../flowbun-registry:/app/registry:ro
     env_file:
       - .env
     environment:
-      # Live: battery_controller (and any other @hass/action node) sends
-      # real service calls to Home Assistant instead of just logging them.
-      # See packages/runtime/src/hass/client.ts's isDryRun().
+      # Live vs just logged HASS calls
       FLOWBUN_DRY_RUN: "false"
+      FLOWBUN_REGISTRY_URL: /app/registry

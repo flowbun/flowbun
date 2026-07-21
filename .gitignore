@@ -13,6 +13,14 @@ data/.gitignore
 # alongside data/.gitignore's own "agent/" entry (this outer repo doesn't
 # blanket-ignore data/, so it needs its own explicit line).
 data/agent/
+# data/'s own npm project (phase 1) and installed-flowbun-package tracking
+# (phase 3) — versioned by the data repo's own git (data/.git), not this
+# outer one; this repo doesn't blanket-ignore data/ (see above), so a live
+# deployment's package.json/bun.lock/tracking-file writes would otherwise
+# show up as untracked here.
+data/package.json
+data/bun.lock
+data/flowbun-packages.json
 dist/
 *.log
 # worker-entry.test.ts's/worker-manager.test.ts's scratch fixture dirs —
@@ -21,3 +29,4 @@ dist/
 # backstop if a run crashes mid-test.
 .worker-entry-test-*
 .worker-manager-test-*
+flowbun.code-workspace

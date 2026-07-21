@@ -1540,6 +1540,155 @@ body {
   margin-top: 0;
 }
 
+/* PackagesModal (opened from SystemStatsModal's "Manage packages…" button)
+   — reuses .create-dialog-* for the overlay/panel/actions/input chrome and
+   .detail-label for secondary text, just wider (like .history-panel) to
+   comfortably fit a package name + version range per row. */
+.packages-modal-panel {
+  width: min(520px, 90vw);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+/* Same visual idea as .log-panel-tab: plain buttons where exactly one is
+   "showing" at a time, the active one accent-highlighted. */
+.packages-modal-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.packages-modal-tab {
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.packages-modal-tab.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.packages-modal-registry-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.packages-modal-source {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.packages-modal-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.packages-modal-desc {
+  white-space: normal;
+  line-height: 1.4;
+}
+
+/* Neutral row-action button (Install/Update/Load registry) — the
+   affirmative sibling of .packages-modal-remove below, accent on hover
+   instead of error, same shape as .history-panel-restore. */
+.packages-modal-action {
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.packages-modal-action:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.packages-modal-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.packages-modal-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.packages-modal-add input {
+  flex: 1;
+}
+
+.packages-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 40vh;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+
+.packages-modal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.packages-modal-row-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.packages-modal-row-info code {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.packages-modal-remove {
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.packages-modal-remove:hover:not(:disabled) {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.packages-modal-remove:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .flow-detail-typecheck-output {
   max-height: 240px;
   overflow: auto;
@@ -1552,6 +1701,10 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0 0 12px;
+}
+
+.packages-modal-panel .flow-detail-typecheck-output {
+  margin-top: 12px;
 }
 
 /* Mobile layout: the canvas takes the full width by default, with the

@@ -9,11 +9,14 @@ import type {
   DbQueryOutcome,
   FlowEntry,
   HassEntitySummary,
+  NpmPackageEntry,
   ServerToClient,
   TypecheckOutcome,
 } from "flowbun/ws";
 import type { AiHostClient } from "./ai-host-client";
 import type { ChatEventBuffer } from "./chat-event-buffer";
+import type { FlowPackageManager } from "./flow-packages";
+import { ModifiedFilesError } from "./flow-packages";
 import { formatWithBiome } from "./format-block";
 import type { GitSnapshotter } from "./git-snapshot";
 import type { LogBuffer } from "./log-buffer";
@@ -74,6 +77,17 @@ export interface WsServerDeps {
    * hood (bun:sqlite), wrapped as async purely so a thrown syntax error
    * becomes a rejected promise, matching every other deps call here. */
   queryDb: (sql: string) => Promise<DbQueryOutcome>;
+  /** data/'s own npm dependencies — see coordinator's npm-packages.ts. */
+  listNpmPackages: () => Promise<NpmPackageEntry[]>;
+  installNpmPackage: (
+    spec: string,
+  ) => Promise<{ output: string; typecheck: TypecheckOutcome }>;
+  removeNpmPackage: (
+    name: string,
+  ) => Promise<{ output: string; typecheck: TypecheckOutcome }>;
+  /** data/'s installed flowbun packages (blocks + example wiring) — see
+   * coordinator's flow-packages.ts. */
+  flowPackages: FlowPackageManager;
 }
 
 export function buildPalette(
@@ -512,6 +526,180 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 requestId: msg.requestId,
                 ok: false,
                 error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.npm.list": {
+            try {
+              const packages = await deps.listNpmPackages();
+              reply({
+                type: "pkg.npm.listResult",
+                requestId: msg.requestId,
+                ok: true,
+                packages,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.npm.listResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.npm.add": {
+            try {
+              const { output, typecheck } = await deps.installNpmPackage(
+                msg.spec,
+              );
+              reply({
+                type: "pkg.npm.addResult",
+                requestId: msg.requestId,
+                ok: true,
+                output,
+                typecheck,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.npm.addResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.npm.remove": {
+            try {
+              const { output, typecheck } = await deps.removeNpmPackage(
+                msg.name,
+              );
+              reply({
+                type: "pkg.npm.removeResult",
+                requestId: msg.requestId,
+                ok: true,
+                output,
+                typecheck,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.npm.removeResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.flow.registry": {
+            try {
+              const { source, packages } =
+                await deps.flowPackages.browseRegistry();
+              reply({
+                type: "pkg.flow.registryResult",
+                requestId: msg.requestId,
+                ok: true,
+                source,
+                packages,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.flow.registryResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.flow.list": {
+            try {
+              const packages = await deps.flowPackages.listInstalled();
+              reply({
+                type: "pkg.flow.listResult",
+                requestId: msg.requestId,
+                ok: true,
+                packages,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.flow.listResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.flow.install": {
+            try {
+              const { version, output, typecheck } =
+                await deps.flowPackages.install(msg.name, msg.version);
+              reply({
+                type: "pkg.flow.installResult",
+                requestId: msg.requestId,
+                ok: true,
+                version,
+                output,
+                typecheck,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.flow.installResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.flow.uninstall": {
+            try {
+              const { output, modifiedFiles } =
+                await deps.flowPackages.uninstall(msg.name);
+              reply({
+                type: "pkg.flow.uninstallResult",
+                requestId: msg.requestId,
+                ok: true,
+                output,
+                modifiedFiles,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.flow.uninstallResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "pkg.flow.update": {
+            try {
+              const { version, output, typecheck } =
+                await deps.flowPackages.update(msg.name, {
+                  version: msg.version,
+                  force: msg.force,
+                });
+              reply({
+                type: "pkg.flow.updateResult",
+                requestId: msg.requestId,
+                ok: true,
+                version,
+                output,
+                typecheck,
+              });
+            } catch (err) {
+              reply({
+                type: "pkg.flow.updateResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+                ...(err instanceof ModifiedFilesError
+                  ? { modifiedFiles: err.files }
+                  : {}),
               });
             }
             break;

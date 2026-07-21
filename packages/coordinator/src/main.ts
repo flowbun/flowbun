@@ -9,6 +9,7 @@ import {
   runTypecheck,
   WiringSchema,
 } from "flowbun";
+import runtimePkg from "flowbun/package.json";
 import type {
   FlowEntry,
   FlowStatus,
@@ -19,9 +20,16 @@ import type { AgentToolDeps } from "./agent/tools";
 import { createAiHostClient } from "./ai-host-client";
 import { ChatEventBuffer } from "./chat-event-buffer";
 import { runReplQuery } from "./db-repl";
+import { createFlowPackageManager } from "./flow-packages";
 import { formatWithBiome } from "./format-block";
 import { createGitSnapshotter } from "./git-snapshot";
 import { LogBuffer } from "./log-buffer";
+import {
+  installNpmPackage,
+  listNpmPackages,
+  removeNpmPackage,
+  selfHealNpmInstall,
+} from "./npm-packages";
 import { createReloadSerializer } from "./serialize-reload";
 import { createSnapshottingSerializer } from "./snapshotting-serializer";
 import { Supervisor } from "./supervisor";
@@ -33,6 +41,9 @@ import { buildPalette, startWsServer } from "./ws-server";
 const DATA_DIR =
   Bun.env.FLOWBUN_DATA_DIR ?? join(import.meta.dir, "..", "..", "..", "data");
 const WS_PORT = Number(Bun.env.FLOWBUN_WS_PORT ?? 8787);
+const FLOWBUN_REGISTRY_URL =
+  Bun.env.FLOWBUN_REGISTRY_URL ??
+  "https://raw.githubusercontent.com/aquarat/flowbun-registry/main";
 // A full reload (typecheck + restart) routinely takes longer than a
 // single-digit hundred ms, so a burst of edits within that window can
 // trigger several overlapping reloads for the same file. 2s comfortably
@@ -232,6 +243,15 @@ async function main(): Promise<void> {
       broadcast?.({ type: "flow.status", flow, status });
     },
   );
+
+  // Resyncs data/node_modules to data/package.json + data/bun.lock before
+  // anything discovers/typechecks a single block -- otherwise a block that
+  // depends on a previously-installed npm package would spuriously fail on
+  // a fresh bind mount / restarted container until someone manually
+  // reinstalled. No-ops if data/package.json doesn't exist yet (nothing
+  // has ever been installed); fails open on any error (see its own doc
+  // comment).
+  await selfHealNpmInstall(DATA_DIR);
 
   let registry = await discoverBlocks(DATA_DIR);
   const { loaded, failed: failedToLoad } = await loadAllFlows(registry);
@@ -848,6 +868,60 @@ async function main(): Promise<void> {
     await handleWiringFileDeleted(path, `delete flow: ${file}`);
   }
 
+  /**
+   * Thin wrappers around npm-packages.ts's pure install/remove, following
+   * the same shape as createBlock/deleteBlock above: do the actual disk
+   * mutation, then run it through reloadBlocksAndRestartAll so (a) any
+   * block that was failing typecheck purely because an import was missing
+   * gets re-checked and can now succeed, and (b) the resulting
+   * data/package.json + data/bun.lock changes ride the existing
+   * serializeReload -> createSnapshottingSerializer path into the same
+   * auto-commit history every other write already goes through, with
+   * nothing extra to call here.
+   */
+  async function npmInstall(
+    spec: string,
+  ): Promise<{ output: string; typecheck: TypecheckOutcome }> {
+    const result = await installNpmPackage(DATA_DIR, spec);
+    if (!result.ok) {
+      throw new Error(result.output || `failed to add "${spec}"`);
+    }
+    const typecheck = await reloadBlocksAndRestartAll(`npm add: ${spec}`);
+    return { output: result.output, typecheck };
+  }
+
+  async function npmRemove(
+    name: string,
+  ): Promise<{ output: string; typecheck: TypecheckOutcome }> {
+    const result = await removeNpmPackage(DATA_DIR, name);
+    if (!result.ok) {
+      throw new Error(result.output || `failed to remove "${name}"`);
+    }
+    const typecheck = await reloadBlocksAndRestartAll(`npm remove: ${name}`);
+    return { output: result.output, typecheck };
+  }
+
+  // Injects every main()-closure dependency the manager needs (registry via
+  // getter, since it's a `let` reassigned on every blocks reload; flows is
+  // the live Map main.ts already keeps current) -- same injection-over-
+  // import shape agentToolDeps already uses for the same closures, which
+  // keeps flow-packages.ts's manager fully fake-able in its own unit tests.
+  const flowPackages = createFlowPackageManager({
+    dataDir: DATA_DIR,
+    registrySource: FLOWBUN_REGISTRY_URL,
+    runtimeVersion: runtimePkg.version,
+    flows,
+    getBlockRegistry: () => registry,
+    reloadBlocksAndRestartAll,
+    reloadWiringFile,
+    deleteFlow,
+    markSelfWrite: (path: string) => recentSelfWrites.set(path, Date.now()),
+    // flow-packages.ts already passes fully data-relative paths
+    // ("blocks/foo.ts") -- matching deleteBlock's own join("blocks", file)
+    // shape exactly, so no re-joining here.
+    forgetUndo: (relPath: string) => undoStack.forget(relPath),
+  });
+
   // agent/tools.ts's handlers only need agentToolDeps's subset of this
   // object (no supervisor/logBuffer/chatEvents/gitSnapshotter/
   // getSystemStats/queryDb) — reusing it here means the agent's tools (run
@@ -864,6 +938,10 @@ async function main(): Promise<void> {
     getSystemStats: () =>
       collectSystemStats(flows, registry.size, logBuffer.all().length),
     queryDb: async (sql: string) => runReplQuery(replDb, sql),
+    listNpmPackages: () => listNpmPackages(DATA_DIR),
+    installNpmPackage: npmInstall,
+    removeNpmPackage: npmRemove,
+    flowPackages,
   };
 
   const wsServer = startWsServer(WS_PORT, { ...coordinatorDeps, aiHostClient });
@@ -928,10 +1006,22 @@ async function main(): Promise<void> {
       )
         return;
       if (!(await Bun.file(scope.file).exists())) {
-        await handleWiringFileDeleted(
-          scope.file,
-          `external delete: ${basename(scope.file)}`,
-        );
+        // Wrapped defensively, same reasoning as the sibling reload branch
+        // just below: nothing above this fs-watcher callback can catch a
+        // rejection, so any throw here (however unlikely) would crash the
+        // entire coordinator process rather than just this one file's
+        // handling -- the exact failure mode shutdownCurrent's own doc
+        // comment (supervisor.ts) was hardened against.
+        try {
+          await handleWiringFileDeleted(
+            scope.file,
+            `external delete: ${basename(scope.file)}`,
+          );
+        } catch (err) {
+          console.error(
+            `[coordinator] failed to handle deleted wiring file ${scope.file}: ${err}`,
+          );
+        }
         return;
       }
       try {

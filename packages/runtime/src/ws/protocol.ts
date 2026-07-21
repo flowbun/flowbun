@@ -72,6 +72,67 @@ export interface HassEntitySummary {
   friendlyName?: string;
 }
 
+/** One dependency listed in data/package.json, cross-referenced against
+ * what's actually on disk under data/node_modules — see coordinator's
+ * npm-packages.ts. resolvedVersion is absent if the package is declared but
+ * somehow not installed (e.g. node_modules was wiped and the self-heal
+ * install hasn't run yet). */
+export interface NpmPackageEntry {
+  name: string;
+  requestedRange: string;
+  resolvedVersion?: string;
+}
+
+/** One file a flow package installed into data/ — path is registry-relative
+ * ("blocks/foo.ts", "blocks/__tests__/foo.test.ts", "wiring/foo_demo.json").
+ * sha256 is the hash of the bytes actually WRITTEN, not the registry's own
+ * hash — wiring is re-serialized with `disabled: true` forced at install
+ * time (see coordinator's flow-packages.ts), so recording the registry's
+ * hash would make every wiring file read as "locally modified" the moment
+ * it's installed. */
+export interface InstalledFlowPackageFile {
+  path: string;
+  sha256: string;
+}
+
+/** One entry in data/flowbun-packages.json — see coordinator's
+ * flow-packages.ts. */
+export interface InstalledFlowPackage {
+  name: string;
+  version: string;
+  /** The registry base (URL or local path) this was installed from. */
+  source: string;
+  installedAt: string; // ISO 8601
+  npmDependencies: Record<string, string>;
+  files: InstalledFlowPackageFile[];
+}
+
+/** One version of one registry package, as browsable from the editor —
+ * mirrors index.json's shape plus a server-computed compatibility flag. */
+export interface FlowPackageVersionInfo {
+  version: string;
+  description: string;
+  author?: string;
+  /** Raw compat range from the manifest, e.g. ">=0". */
+  flowbun: string;
+  /** False both when the range genuinely excludes this runtime's version
+   * AND when the range couldn't be parsed at all — either way, install
+   * refuses it. */
+  compatible: boolean;
+  npmDependencies: Record<string, string>;
+  blocks: string[];
+  wiring: string[];
+  tests: string[];
+}
+
+export interface FlowPackageSummary {
+  name: string;
+  /** From data/flowbun-packages.json — absent if not installed. */
+  installedVersion?: string;
+  /** Newest first, mirroring index.json's own ordering. */
+  versions: FlowPackageVersionInfo[];
+}
+
 /** One commit touching a file under data/ — see coordinator's
  * git-snapshot.ts (this is the wire-format mirror of its HistoryEntry,
  * same duplication pattern as HassEntitySummary above). */
@@ -266,6 +327,25 @@ export type ClientToServer =
   | { type: "block.create"; requestId: string; name: string }
   | { type: "hass.entities"; requestId: string }
   | { type: "system.stats"; requestId: string }
+  | { type: "pkg.npm.list"; requestId: string }
+  | { type: "pkg.npm.add"; requestId: string; spec: string }
+  | { type: "pkg.npm.remove"; requestId: string; name: string }
+  | { type: "pkg.flow.registry"; requestId: string }
+  | { type: "pkg.flow.list"; requestId: string }
+  | {
+      type: "pkg.flow.install";
+      requestId: string;
+      name: string;
+      version?: string;
+    }
+  | { type: "pkg.flow.uninstall"; requestId: string; name: string }
+  | {
+      type: "pkg.flow.update";
+      requestId: string;
+      name: string;
+      version?: string;
+      force?: boolean;
+    }
   | { type: "db.query"; requestId: string; sql: string }
   | {
       type: "history.list";
@@ -422,6 +502,103 @@ export type ServerToClient =
       stats: SystemStats;
     }
   | { type: "system.statsResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "pkg.npm.listResult";
+      requestId: string;
+      ok: true;
+      packages: NpmPackageEntry[];
+    }
+  | { type: "pkg.npm.listResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "pkg.npm.addResult";
+      requestId: string;
+      ok: true;
+      /** Combined stdout+stderr from `bun add`, shown to the user verbatim. */
+      output: string;
+      typecheck: TypecheckOutcome;
+    }
+  | { type: "pkg.npm.addResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "pkg.npm.removeResult";
+      requestId: string;
+      ok: true;
+      output: string;
+      typecheck: TypecheckOutcome;
+    }
+  | {
+      type: "pkg.npm.removeResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
+  | {
+      type: "pkg.flow.registryResult";
+      requestId: string;
+      ok: true;
+      source: string;
+      packages: FlowPackageSummary[];
+    }
+  | {
+      type: "pkg.flow.registryResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
+  | {
+      type: "pkg.flow.listResult";
+      requestId: string;
+      ok: true;
+      packages: InstalledFlowPackage[];
+    }
+  | { type: "pkg.flow.listResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "pkg.flow.installResult";
+      requestId: string;
+      ok: true;
+      version: string;
+      output: string;
+      typecheck: TypecheckOutcome;
+    }
+  | {
+      type: "pkg.flow.installResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
+  | {
+      type: "pkg.flow.uninstallResult";
+      requestId: string;
+      ok: true;
+      output: string;
+      /** Files whose on-disk hash no longer matched the recorded one —
+       * deleted anyway (git history still has them), listed so the user
+       * knows local edits went with them. */
+      modifiedFiles: string[];
+    }
+  | {
+      type: "pkg.flow.uninstallResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
+  | {
+      type: "pkg.flow.updateResult";
+      requestId: string;
+      ok: true;
+      version: string;
+      output: string;
+      typecheck: TypecheckOutcome;
+    }
+  | {
+      type: "pkg.flow.updateResult";
+      requestId: string;
+      ok: false;
+      error: string;
+      /** Present when the failure is "locally modified files, no force" —
+       * lets the UI render a "force update" affordance without parsing the
+       * error string. */
+      modifiedFiles?: string[];
+    }
   | ({ type: "db.queryResult"; requestId: string; ok: true } & DbQueryOutcome)
   | { type: "db.queryResult"; requestId: string; ok: false; error: string }
   | {

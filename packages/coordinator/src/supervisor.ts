@@ -191,11 +191,24 @@ export class Supervisor {
         this.aiHostClient
           .callAgent(rt.flowName, msg.nodeId, msg.input, msg.config)
           .then((result) => {
-            subprocess.send({
-              type: "agent.result",
-              requestId: msg.requestId,
-              ...result,
-            } satisfies CoordinatorToFlowHost);
+            // The owning flow-host can have already exited (crash,
+            // deliberate restart/stop) by the time this agent call
+            // resolves -- nothing to deliver the result to in that case.
+            // This is a bare .then() with no .catch(), so an uncaught
+            // throw here (Bun's IPC .send() throws synchronously rather
+            // than rejecting) becomes an unhandled rejection, fatal to the
+            // whole coordinator process -- same race shutdownCurrent's own
+            // doc comment describes, just reached from a different call
+            // site.
+            try {
+              subprocess.send({
+                type: "agent.result",
+                requestId: msg.requestId,
+                ...result,
+              } satisfies CoordinatorToFlowHost);
+            } catch {
+              // subprocess already gone; nothing to do.
+            }
           });
         break;
       case "log":
@@ -330,7 +343,22 @@ export class Supervisor {
     // period (or the call's own timeout) to eventually notice nobody's
     // listening for the result anymore.
     this.aiHostClient.cancelForFlow(rt.flowName);
-    rt.subprocess.send({ type: "shutdown" } satisfies CoordinatorToFlowHost);
+    try {
+      rt.subprocess.send({ type: "shutdown" } satisfies CoordinatorToFlowHost);
+    } catch {
+      // The tracked subprocess can already have exited (e.g. it just
+      // crash-looped) between whatever last observed it as alive and this
+      // call -- onExit's status update is asynchronous relative to
+      // stopFlow/restartFlow being invoked, so this is a real race, not a
+      // hypothetical one (reproduced: a flow crash-looping right as its
+      // wiring file is deleted). Bun's IPC .send() throws synchronously
+      // rather than rejecting in that case, and this call site sits behind
+      // paths (the fs-watcher's own callback in main.ts) that have nothing
+      // above them to catch a rejection -- letting it escape crashes the
+      // entire coordinator process, not just this one flow. Nothing left
+      // to gracefully shut down here regardless.
+      return;
+    }
     const exitedInTime = await Promise.race([
       rt.subprocess.exited.then(() => true),
       new Promise<false>((r) => setTimeout(() => r(false), 3000)),

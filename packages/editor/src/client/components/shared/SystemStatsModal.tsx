@@ -21,7 +21,13 @@ function statusSummary(byStatus: Record<string, number>): string {
  * is a "check in on it" view, not something worth a permanent broadcast
  * subscription for.
  */
-export function SystemStatsModal({ onClose }: { onClose: () => void }) {
+export function SystemStatsModal({
+  onClose,
+  onManagePackages,
+}: {
+  onClose: () => void;
+  onManagePackages: () => void;
+}) {
   const { send } = useFlowbunSocket();
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,6 +164,9 @@ export function SystemStatsModal({ onClose }: { onClose: () => void }) {
         )}
         {!stats && !error && <div className="detail-label">Loading…</div>}
         <div className="create-dialog-actions">
+          <button type="button" onClick={onManagePackages}>
+            Manage packages…
+          </button>
           <button type="button" onClick={onClose}>
             Close
           </button>

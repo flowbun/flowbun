@@ -12,6 +12,7 @@ import { FlowDetailModal } from "./components/StatusBar/FlowDetailModal";
 import { StatusDot } from "./components/StatusBar/StatusDot";
 import { ConfirmDialog } from "./components/shared/ConfirmDialog";
 import { HistoryPanel } from "./components/shared/HistoryPanel";
+import { PackagesModal } from "./components/shared/PackagesModal";
 import { ResizeHandle } from "./components/shared/ResizeHandle";
 import { SystemStatsModal } from "./components/shared/SystemStatsModal";
 import { useIsMobile } from "./hooks/useIsMobile";
@@ -53,6 +54,7 @@ function Shell() {
   } | null>(null);
   const [flowDetailFile, setFlowDetailFile] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
+  const [packagesOpen, setPackagesOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [chatOpen, setChatOpen] = usePersistedState(
     "flowbun.chatPanel.open",
@@ -434,7 +436,16 @@ function Shell() {
           }}
         />
       )}
-      {statsOpen && <SystemStatsModal onClose={() => setStatsOpen(false)} />}
+      {statsOpen && (
+        <SystemStatsModal
+          onClose={() => setStatsOpen(false)}
+          onManagePackages={() => {
+            setStatsOpen(false);
+            setPackagesOpen(true);
+          }}
+        />
+      )}
+      {packagesOpen && <PackagesModal onClose={() => setPackagesOpen(false)} />}
       {historyOpen && entry && (
         <HistoryPanel
           kind="wiring"

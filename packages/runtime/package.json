@@ -16,7 +16,8 @@
     "./ipc": "./src/ipc/protocol.ts",
     "./ws": "./src/ws/protocol.ts",
     "./wiring": "./src/wiring/schema.ts",
-    "./auth": "./src/auth/session.ts"
+    "./auth": "./src/auth/session.ts",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
