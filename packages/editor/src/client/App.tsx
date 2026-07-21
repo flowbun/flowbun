@@ -11,6 +11,7 @@ import { PaletteSidebar } from "./components/Palette/PaletteSidebar";
 import { FlowDetailModal } from "./components/StatusBar/FlowDetailModal";
 import { StatusDot } from "./components/StatusBar/StatusDot";
 import { ConfirmDialog } from "./components/shared/ConfirmDialog";
+import { ConnectionBanner } from "./components/shared/ConnectionBanner";
 import { HistoryPanel } from "./components/shared/HistoryPanel";
 import { PackagesModal } from "./components/shared/PackagesModal";
 import { ResizeHandle } from "./components/shared/ResizeHandle";
@@ -128,6 +129,7 @@ function Shell() {
 
   return (
     <>
+      <ConnectionBanner connected={state.connected} />
       <div
         ref={headerRef}
         className="app-header"

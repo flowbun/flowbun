@@ -15,6 +15,7 @@ import {
   useRef,
 } from "react";
 import { logToDevtoolsConsole } from "../devtools-console";
+import { generateRequestId } from "../lib/requestId";
 
 interface State {
   connected: boolean;
@@ -45,6 +46,13 @@ type Action =
 
 const MAX_CLIENT_LOGS = 2000;
 const MAX_CLIENT_CHAT_EVENTS = 1000;
+// App-level heartbeat: the OS/browser's own WebSocket close event isn't
+// reliable for detecting a connection that died silently (e.g. the laptop
+// slept mid-connection, or a NAT/proxy dropped it without a close frame) —
+// this notices within one interval instead of waiting on a TCP timeout that
+// can take minutes to hours. See coordinator's ws-server.ts "ping" case.
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 5_000;
 
 export function lastProcessedKey(flow: string, nodeId: string): string {
   return `${flow}::${nodeId}`;
@@ -229,11 +237,35 @@ export function FlowbunSocketProvider({
       if (cancelled) return;
       const ws = new WebSocket(coordinatorWsUrl);
       wsRef.current = ws;
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
       ws.onopen = () => {
         dispatch({ type: "connected", value: true });
         retryDelay = 500;
+        // A closed/half-open socket surfaces via onclose (handled below)
+        // eventually, but on a silently-dead connection (e.g. resuming
+        // from sleep) that can take a very long time — proactively round-
+        // tripping a ping catches it in one interval instead.
+        heartbeat = setInterval(() => {
+          const requestId = generateRequestId();
+          const timeout = setTimeout(() => {
+            pending.current.delete(requestId);
+            ws.close();
+          }, HEARTBEAT_TIMEOUT_MS);
+          pending.current.set(requestId, {
+            resolve: () => {
+              clearTimeout(timeout);
+              pending.current.delete(requestId);
+            },
+            reject: () => {
+              clearTimeout(timeout);
+              pending.current.delete(requestId);
+            },
+          });
+          ws.send(JSON.stringify({ type: "ping", requestId }));
+        }, HEARTBEAT_INTERVAL_MS);
       };
       ws.onclose = () => {
+        if (heartbeat) clearInterval(heartbeat);
         dispatch({ type: "connected", value: false });
         // Nothing still in flight will ever get a reply on this socket —
         // reject every pending request now so awaiting callers (Save/

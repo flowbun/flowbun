@@ -161,6 +161,23 @@ body {
   background: var(--success);
 }
 
+/* More visible companion to .connection-dot (see ConnectionBanner.tsx) —
+   the dot alone is easy to miss when a connection actually drops mid-use. */
+.connection-banner {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 150;
+  background: var(--warning);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
 .app-body {
   display: flex;
   flex: 1;
@@ -1821,4 +1838,62 @@ body {
     height: 26px;
     font-size: 13px;
   }
+}
+
+/* Root-level render-error fallback (see ErrorBoundary.tsx) — same
+   solid full-page wrapper as .login-gate-page, since there's no app
+   content underneath it to dim either. */
+.error-boundary-screen {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.error-boundary-panel {
+  width: min(420px, 90vw);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.error-boundary-panel h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.error-boundary-panel p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.error-boundary-message {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--error);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  margin: 0 0 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.error-boundary-panel button {
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--accent);
+  background: var(--accent-dim);
+  color: var(--text);
 }

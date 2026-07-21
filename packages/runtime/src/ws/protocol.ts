@@ -373,7 +373,12 @@ export type ClientToServer =
     }
   | { type: "chat.newSession"; requestId: string }
   | { type: "chat.listSessions"; requestId: string }
-  | { type: "chat.resumeSession"; requestId: string; sessionId: string };
+  | { type: "chat.resumeSession"; requestId: string; sessionId: string }
+  // App-level heartbeat (see FlowbunSocketContext) — a protocol-level pong
+  // only proves the OS/browser TCP stack answered, not that this specific
+  // tab's connection survived something like a sleep/wake; round-tripping
+  // through the same request/reply path as everything else catches that.
+  | { type: "ping"; requestId: string };
 
 // ---------- coordinator -> browser ----------
 export type ServerToClient =
@@ -655,4 +660,5 @@ export type ServerToClient =
    * in sync (session switching is global, not per-tab — see
    * agent/runner.ts). Replaces the client's whole chatEvents state, unlike
    * "chat.event" which appends one. */
-  | { type: "chat.historyReset"; events: ChatEvent[] };
+  | { type: "chat.historyReset"; events: ChatEvent[] }
+  | { type: "pong"; requestId: string };

@@ -2,6 +2,7 @@ import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 
 // "ResizeObserver loop completed with undelivered notifications." is a
 // known-benign browser quirk, not a real error: it fires whenever a
@@ -48,4 +49,8 @@ window.addEventListener("error", (e) => {
 
 const container = document.getElementById("root");
 if (!container) throw new Error("missing #root element");
-createRoot(container).render(<App />);
+createRoot(container).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
+);

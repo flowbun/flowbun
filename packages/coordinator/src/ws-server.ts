@@ -926,6 +926,10 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             );
             break;
           }
+          case "ping": {
+            reply({ type: "pong", requestId: msg.requestId });
+            break;
+          }
         }
       },
       close(ws: ServerWebSocket<undefined>) {
