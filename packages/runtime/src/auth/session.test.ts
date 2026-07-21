@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   checkCredentials,
+  checkLoginRateLimit,
   extractToken,
   getAuthConfig,
   isAuthorized,
+  noteLoginFailure,
+  noteLoginSuccess,
   SESSION_COOKIE,
   signSession,
   verifySession,
@@ -224,5 +227,54 @@ describe("isAuthorized", () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(isAuthorized(req, dir)).toBe(true);
+  });
+});
+
+describe("checkLoginRateLimit / noteLoginFailure / noteLoginSuccess", () => {
+  // loginAttempts is module-global state, keyed by caller -- a fresh random
+  // key per test keeps these independent of each other and of any other
+  // test file that happens to exercise the same module.
+  function freshKey(): string {
+    return crypto.randomUUID();
+  }
+
+  test("a fresh key is always allowed", () => {
+    expect(checkLoginRateLimit(freshKey())).toEqual({ allowed: true });
+  });
+
+  test("stays allowed below the failure threshold", () => {
+    const key = freshKey();
+    noteLoginFailure(key);
+    noteLoginFailure(key);
+    expect(checkLoginRateLimit(key)).toEqual({ allowed: true });
+  });
+
+  test("locks out once the failure threshold is reached, with a positive retryAfterSeconds", () => {
+    const key = freshKey();
+    for (let i = 0; i < 5; i++) noteLoginFailure(key);
+    const result = checkLoginRateLimit(key);
+    expect(result.allowed).toBe(false);
+    expect(result.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  test("noteLoginSuccess clears an in-progress failure count", () => {
+    const key = freshKey();
+    noteLoginFailure(key);
+    noteLoginFailure(key);
+    noteLoginFailure(key);
+    noteLoginFailure(key);
+    noteLoginSuccess(key);
+    // A 5th failure right after a success starts a fresh window/count, not
+    // a continuation of the pre-success streak -- shouldn't lock out yet.
+    noteLoginFailure(key);
+    expect(checkLoginRateLimit(key)).toEqual({ allowed: true });
+  });
+
+  test("each key is throttled independently", () => {
+    const lockedKey = freshKey();
+    const freeKey = freshKey();
+    for (let i = 0; i < 5; i++) noteLoginFailure(lockedKey);
+    expect(checkLoginRateLimit(lockedKey).allowed).toBe(false);
+    expect(checkLoginRateLimit(freeKey)).toEqual({ allowed: true });
   });
 });

@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -55,6 +55,69 @@ export function checkCredentials(
   );
 }
 
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 5 * 60_000;
+const LOGIN_LOCKOUT_MS = 5 * 60_000;
+
+interface LoginAttemptState {
+  failures: number;
+  windowStart: number;
+  lockedUntil: number;
+}
+
+/**
+ * Per-key (by caller's IP -- see editor's server.ts) in-memory login
+ * throttle: checkCredentials() itself is timing-safe, but nothing was
+ * stopping unlimited attempts against it. In-memory and un-keyed-by-dataDir
+ * is deliberate, matching this module's single-household-LAN scope (see the
+ * module doc comment above) -- it resets on a restart, which is fine since
+ * the goal is slowing down a live brute-force script, not persisting a ban
+ * list.
+ */
+const loginAttempts = new Map<string, LoginAttemptState>();
+
+export interface LoginRateLimitResult {
+  allowed: boolean;
+  retryAfterSeconds?: number;
+}
+
+/** Call before checking credentials -- refuses the attempt outright while
+ * locked out, without touching checkCredentials at all. */
+export function checkLoginRateLimit(key: string): LoginRateLimitResult {
+  const state = loginAttempts.get(key);
+  if (!state) return { allowed: true };
+  const now = Date.now();
+  if (now < state.lockedUntil) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.ceil((state.lockedUntil - now) / 1000),
+    };
+  }
+  return { allowed: true };
+}
+
+/** Call after a failed checkCredentials(). Locks the key out for
+ * LOGIN_LOCKOUT_MS once LOGIN_MAX_ATTEMPTS failures land inside one
+ * LOGIN_WINDOW_MS window. */
+export function noteLoginFailure(key: string): void {
+  const now = Date.now();
+  let state = loginAttempts.get(key);
+  if (!state || now - state.windowStart > LOGIN_WINDOW_MS) {
+    state = { failures: 0, windowStart: now, lockedUntil: 0 };
+    loginAttempts.set(key, state);
+  }
+  state.failures += 1;
+  if (state.failures >= LOGIN_MAX_ATTEMPTS) {
+    state.lockedUntil = now + LOGIN_LOCKOUT_MS;
+  }
+}
+
+/** Call after a successful checkCredentials() -- a legitimate login clears
+ * whatever failure count this key had been accumulating. */
+export function noteLoginSuccess(key: string): void {
+  loginAttempts.delete(key);
+}
+
 /**
  * The JWT signing key lives under data/state/ (bind-mounted, and already
  * gitignored by data/.gitignore's own "state/" entry — the same place
@@ -70,14 +133,25 @@ function getOrCreateSecret(dataDir: string): Buffer {
   const dir = join(dataDir, "state");
   const path = join(dir, "auth-secret.key");
   try {
-    return Buffer.from(readFileSync(path, "utf8").trim(), "hex");
+    const secret = Buffer.from(readFileSync(path, "utf8").trim(), "hex");
+    // Heals permissions on a secret file created before mode:0o600 was
+    // added below -- this key can mint 10-year sessions for a control API
+    // that can write and execute arbitrary code (see AGENTS.md), so it
+    // should never have been left world-readable in the first place.
+    try {
+      chmodSync(path, 0o600);
+    } catch {
+      // Best-effort: a read-only filesystem or permissions mismatch here
+      // shouldn't block auth from working at all.
+    }
+    return secret;
   } catch {
     // Fall through to create.
   }
   mkdirSync(dir, { recursive: true });
   const secret = randomBytes(32);
   try {
-    writeFileSync(path, secret.toString("hex"), { flag: "wx" });
+    writeFileSync(path, secret.toString("hex"), { flag: "wx", mode: 0o600 });
     return secret;
   } catch {
     // Lost the create race to a sibling process -- read what it wrote.

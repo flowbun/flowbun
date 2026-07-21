@@ -1,8 +1,11 @@
 import { join } from "node:path";
 import {
   checkCredentials,
+  checkLoginRateLimit,
   getAuthConfig,
   isAuthorized,
+  noteLoginFailure,
+  noteLoginSuccess,
   SESSION_COOKIE,
   signSession,
 } from "flowbun/auth";
@@ -24,7 +27,7 @@ const SESSION_COOKIE_MAX_AGE_SECONDS = Math.floor(10 * 365.25 * 24 * 60 * 60);
 // resolves "localhost" against itself, not this server.
 const EXPLICIT_COORDINATOR_WS = Bun.env.FLOWBUN_COORDINATOR_WS;
 
-Bun.serve({
+const server = Bun.serve({
   port: PORT,
   development: { hmr: true, console: true },
   routes: {
@@ -58,12 +61,27 @@ Bun.serve({
       }
       const config = getAuthConfig();
       if (!config) return new Response("auth not configured", { status: 404 });
+      // checkCredentials() is timing-safe, but nothing was stopping
+      // unlimited attempts against it -- rate-limit by the caller's direct
+      // TCP peer (see checkLoginRateLimit's own doc comment for why this is
+      // in-memory and per-IP, and its limitation behind a reverse proxy,
+      // which this app has no story for today anyway).
+      const ip = server.requestIP(req)?.address ?? "unknown";
+      const limit = checkLoginRateLimit(ip);
+      if (!limit.allowed) {
+        return new Response("too many attempts", {
+          status: 429,
+          headers: { "Retry-After": String(limit.retryAfterSeconds) },
+        });
+      }
       const body = await req.json().catch(() => null);
       const username = typeof body?.username === "string" ? body.username : "";
       const password = typeof body?.password === "string" ? body.password : "";
       if (!checkCredentials(config, username, password)) {
+        noteLoginFailure(ip);
         return new Response("invalid credentials", { status: 401 });
       }
+      noteLoginSuccess(ip);
       const token = signSession(DATA_DIR, username);
       return new Response(null, {
         status: 204,

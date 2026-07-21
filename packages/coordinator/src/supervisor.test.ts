@@ -134,3 +134,95 @@ describe("Supervisor agent.call dispatch", () => {
     ]);
   });
 });
+
+describe("Supervisor node.dead handling", () => {
+  /** registerInactive() creates a real FlowRuntime in the supervisor's own
+   * `flows` map (no subprocess spawned) so callOnMessage's mutations land
+   * somewhere getStatus() can actually observe them -- unlike the tests
+   * above, which only ever inspect the `sent` side channel, this needs the
+   * real rt reference, not a disconnected `{flowName}` literal. */
+  function registerRunningFlow(
+    supervisor: Supervisor,
+    flowName: string,
+  ): { flowName: string } {
+    supervisor.registerInactive(`/tmp/${flowName}.json`, flowName, {
+      kind: "running",
+      pid: 123,
+      since: 1000,
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: reaching the private `flows` map deliberately, see callOnMessage's own doc comment
+    return (supervisor as any).flows.get(flowName);
+  }
+
+  test("degrades a running flow's status, folding in every dead node id reported so far", () => {
+    const supervisor = new Supervisor(
+      "/tmp/does-not-matter",
+      new LogBuffer(),
+      fakeAiHostClient({
+        ok: true,
+        text: "",
+        costUsd: 0,
+        durationMs: 0,
+        numTurns: 0,
+      }),
+    );
+    const rt = registerRunningFlow(supervisor, "hallway_lights");
+
+    callOnMessage(
+      supervisor,
+      rt,
+      { type: "node.dead", nodeId: "n1" },
+      { send: () => {} },
+    );
+    expect(supervisor.getStatus("hallway_lights")).toEqual({
+      kind: "degraded",
+      pid: 123,
+      since: 1000,
+      reason: "node(s) permanently dead (respawn limit exceeded): n1",
+    });
+
+    callOnMessage(
+      supervisor,
+      rt,
+      { type: "node.dead", nodeId: "n2" },
+      { send: () => {} },
+    );
+    expect(supervisor.getStatus("hallway_lights")).toEqual({
+      kind: "degraded",
+      pid: 123,
+      since: 1000,
+      reason: "node(s) permanently dead (respawn limit exceeded): n1, n2",
+    });
+  });
+
+  test("leaves a non-running/degraded flow's status alone -- there's no pid/since to attach a degraded status to", () => {
+    const supervisor = new Supervisor(
+      "/tmp/does-not-matter",
+      new LogBuffer(),
+      fakeAiHostClient({
+        ok: true,
+        text: "",
+        costUsd: 0,
+        durationMs: 0,
+        numTurns: 0,
+      }),
+    );
+    supervisor.registerInactive("/tmp/hallway_lights.json", "hallway_lights", {
+      kind: "restarting",
+      attempt: 1,
+      nextAttemptAt: 5000,
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: reaching the private `flows` map deliberately, see callOnMessage's own doc comment
+    const rt = (supervisor as any).flows.get("hallway_lights");
+    const before = supervisor.getStatus("hallway_lights");
+
+    callOnMessage(
+      supervisor,
+      rt,
+      { type: "node.dead", nodeId: "n1" },
+      { send: () => {} },
+    );
+
+    expect(supervisor.getStatus("hallway_lights")).toEqual(before);
+  });
+});

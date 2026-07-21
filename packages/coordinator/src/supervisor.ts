@@ -25,6 +25,10 @@ interface FlowRuntime {
   crashTimestamps: number[];
   errorTimestamps: number[];
   expectingExit: boolean;
+  // Node ids this flow's WorkerManager has reported permanently dead (see
+  // ipc/protocol.ts's "node.dead") -- cleared in spawn() since a fresh
+  // subprocess starts every worker fresh, with nothing dead yet.
+  deadNodeIds: Set<string>;
 }
 
 export class Supervisor {
@@ -81,6 +85,7 @@ export class Supervisor {
       crashTimestamps: [],
       errorTimestamps: [],
       expectingExit: false,
+      deadNodeIds: new Set(),
     };
     this.flows.set(flowName, rt);
     this.spawn(rt);
@@ -107,6 +112,7 @@ export class Supervisor {
       crashTimestamps: [],
       errorTimestamps: [],
       expectingExit: false,
+      deadNodeIds: new Set(),
     };
     this.flows.set(flowName, rt);
     this.setStatus(rt, status);
@@ -122,6 +128,9 @@ export class Supervisor {
     // process and get re-established fresh by the new one; there's no
     // coordinator-side listener bookkeeping to clear anymore.)
     this.aiHostClient.cancelForFlow(rt.flowName);
+    // A fresh subprocess starts every WorkerManager fresh -- nothing is
+    // dead yet, regardless of what the previous incarnation reported.
+    rt.deadNodeIds.clear();
     const mainPath = join(
       import.meta.dir,
       "..",
@@ -195,7 +204,35 @@ export class Supervisor {
           if (entry.level === "error") this.noteError(rt);
         }
         break;
+      case "node.dead":
+        this.noteNodeDead(rt, msg.nodeId);
+        break;
     }
+  }
+
+  /** A node's respawn budget is exhausted -- unlike a transient error-log
+   * spike (see noteError), nothing will bring it back on its own. Folds
+   * every dead node this flow has reported into one "degraded" status
+   * (reusing the same FlowStatus kind noteError already uses, so the
+   * editor's existing FlowStatusBadge rendering picks this up for free) —
+   * left alone if the flow isn't currently running/degraded, since there's
+   * no pid/since to attach the status to in that case. */
+  private noteNodeDead(rt: FlowRuntime, nodeId: string): void {
+    rt.deadNodeIds.add(nodeId);
+    this.logBuffer.push({
+      level: "error",
+      msg: "node.dead",
+      meta: { nodeId },
+      at: Date.now(),
+      flow: rt.flowName,
+    });
+    if (rt.status.kind !== "running" && rt.status.kind !== "degraded") return;
+    this.setStatus(rt, {
+      kind: "degraded",
+      pid: rt.status.pid,
+      since: rt.status.since,
+      reason: `node(s) permanently dead (respawn limit exceeded): ${[...rt.deadNodeIds].join(", ")}`,
+    });
   }
 
   private noteError(rt: FlowRuntime): void {

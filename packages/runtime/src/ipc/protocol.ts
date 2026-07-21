@@ -72,7 +72,15 @@ export type FlowHostToCoordinator =
       ok: false;
       error: string;
     }
-  | { type: "log"; entries: LogRecord[] };
+  | { type: "log"; entries: LogRecord[] }
+  /** A node's WorkerManager has given up on it permanently (its respawn
+   * budget is exhausted -- see worker-manager.ts's MAX_RESPAWNS) — unlike a
+   * transient crash, nothing will bring this node back short of a whole
+   * flow-host restart. Unsolicited, sent at most once per node per
+   * flow-host lifetime. Surfaced by the supervisor as a "degraded"
+   * FlowStatus rather than a new status kind, since the flow-host process
+   * itself is still very much alive and running every other node fine. */
+  | { type: "node.dead"; nodeId: string };
 
 // ---------- coordinator -> ai-host (Bun.spawn ipc) ----------
 export type CoordinatorToAiHost =
