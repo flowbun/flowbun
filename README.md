@@ -49,6 +49,7 @@ flowbun/
         typecheck/                  # generates and runs the synthetic wire-assertion file (see below)
         hass/                         # the only code allowed to talk to Home Assistant (@hass/trigger, @hass/action, @hass/read)
         core/                           # built-in, non-HA blocks: @core/scheduler, @core/inject, @core/debug
+        http/                           # @http/in — inbound-HTTP boundary block (serves from the flow's own process; kind: "duplex")
         ai/                               # @ai/agent's config/type surface (the SDK loop itself lives in packages/ai-host)
         auth/                              # optional username/password + JWT session support, shared by coordinator + editor (see below)
         ipc/                                # message types shared across every process pair (coordinator<->flow-host, coordinator<->ai-host, flow-host<->Worker)

@@ -12,6 +12,7 @@ function fakeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     fullAccess: false,
     maxTurns: 6,
     timeoutMs: 20,
+    persistSession: false,
     ...overrides,
   };
 }
@@ -23,16 +24,38 @@ const noopLog: Logger = {
   error: () => {},
 };
 
-function fakeNode(blockName: string, config: unknown = {}): LoadedNode {
+function fakeNode(
+  blockName: string,
+  config: unknown = {},
+  kind: "relay" | "transform" = "relay",
+): LoadedNode {
+  // Built as two distinctly-typed branches rather than one object literal
+  // with a variable `kind` — a literal like `"relay"` discriminates the
+  // BlockDef union, but a `"relay" | "transform"`-typed *value* in that
+  // position doesn't satisfy either member.
+  const block =
+    kind === "relay"
+      ? {
+          name: blockName,
+          kind: "relay" as const,
+          config: {},
+          inputs: {},
+          outputs: {},
+        }
+      : {
+          name: blockName,
+          config: {},
+          inputs: {},
+          outputs: {},
+          // Only needsWorker()/kind checks read this in-memory stub in
+          // these tests — process() itself is never actually invoked.
+          async process() {
+            return undefined;
+          },
+        };
   return {
     nodeId: "n1",
-    block: {
-      name: blockName,
-      kind: "relay",
-      config: {},
-      inputs: {},
-      outputs: {},
-    },
+    block,
     blockSpecifier: blockName,
     blockModulePath: blockName,
     config,
@@ -95,6 +118,55 @@ describe("DistributedExecutor agent calls", () => {
         costUsd: 0.02,
         durationMs: 1200,
         numTurns: 2,
+      },
+    });
+  });
+
+  test("a {prompt, meta} input sends only the prompt and echoes meta on the result", async () => {
+    const sent: FlowHostToCoordinator[] = [];
+    const executor = new DistributedExecutor({
+      flow: fakeFlow(fakeNode("@ai/agent", fakeAgentConfig())),
+      // biome-ignore lint/suspicious/noExplicitAny: not exercised by this test
+      workerManager: {} as any as WorkerManager,
+      send: (msg) => sent.push(msg),
+      log: noopLog,
+      agentCallTimeoutMarginMs: 0,
+    });
+
+    const promise = executor.execute({
+      nodeId: "n1",
+      inputs: {
+        prompt: {
+          prompt: "turn on the lights",
+          meta: { requestId: "r-42", conversationId: "c-1" },
+        },
+      },
+      port: "prompt",
+      traceId: "t1",
+      seq: 1,
+    });
+
+    const call = sent[0];
+    if (call?.type !== "agent.call") throw new Error("expected agent.call");
+    // The model sees the bare prompt string — never the correlation state.
+    expect(call.input).toBe("turn on the lights");
+    executor.handleAgentResult({
+      type: "agent.result",
+      requestId: call.requestId,
+      ok: true,
+      text: "done",
+      costUsd: 0.01,
+      durationMs: 900,
+      numTurns: 1,
+    });
+
+    await expect(promise).resolves.toEqual({
+      result: {
+        text: "done",
+        costUsd: 0.01,
+        durationMs: 900,
+        numTurns: 1,
+        meta: { requestId: "r-42", conversationId: "c-1" },
       },
     });
   });
@@ -210,5 +282,68 @@ describe("DistributedExecutor agent calls", () => {
     // Sanity: actually waited roughly timeoutMs+margin, not just the bare
     // node timeout — guards against the margin silently being dropped.
     expect(Date.now() - start).toBeGreaterThanOrEqual(30);
+  });
+});
+
+describe("DistributedExecutor ordinary (non-relay) exec timeout override", () => {
+  test("a node whose config has a numeric timeoutMs gets it passed through (plus margin) to WorkerManager.exec", async () => {
+    const execCalls: Array<{ nodeId: string; req: unknown }> = [];
+    const executor = new DistributedExecutor({
+      flow: fakeFlow(
+        fakeNode("@ai/openai_agent", { timeoutMs: 12_345 }, "transform"),
+      ),
+      workerManager: {
+        allocRequestId: () => 1,
+        exec: async (nodeId: string, _requestId: number, req: unknown) => {
+          execCalls.push({ nodeId, req });
+          return { result: { text: "ok" } };
+        },
+        // biome-ignore lint/suspicious/noExplicitAny: not exercised by this test
+      } as any as WorkerManager,
+      send: () => {},
+      log: noopLog,
+    });
+
+    await executor.execute({
+      nodeId: "n1",
+      inputs: { prompt: "hi" },
+      port: "prompt",
+      traceId: "t1",
+      seq: 1,
+    });
+
+    expect(execCalls).toHaveLength(1);
+    expect((execCalls[0]?.req as { timeoutMs?: number }).timeoutMs).toBe(
+      12_345 + 2_000,
+    );
+  });
+
+  test("a node whose config has no timeoutMs field gets no override (WorkerManager falls back to its own default)", async () => {
+    const execCalls: Array<{ req: unknown }> = [];
+    const executor = new DistributedExecutor({
+      flow: fakeFlow(fakeNode("debounce", { ms: 30_000 }, "transform")),
+      workerManager: {
+        allocRequestId: () => 1,
+        exec: async (_nodeId: string, _requestId: number, req: unknown) => {
+          execCalls.push({ req });
+          return { stable: { state: "on" } };
+        },
+        // biome-ignore lint/suspicious/noExplicitAny: not exercised by this test
+      } as any as WorkerManager,
+      send: () => {},
+      log: noopLog,
+    });
+
+    await executor.execute({
+      nodeId: "n1",
+      inputs: { signal: { state: "on", at: 1 } },
+      port: "signal",
+      traceId: "t1",
+      seq: 1,
+    });
+
+    expect(
+      (execCalls[0]?.req as { timeoutMs?: number }).timeoutMs,
+    ).toBeUndefined();
   });
 });

@@ -1,6 +1,7 @@
 import type { AgentConfig } from "../ai/agent";
 import type { ActionCall } from "../hass/action";
 import type { EntityStateReading, HassEntitySummary } from "../hass/client";
+import type { ExposedEntitySummary } from "../hass/exposed-entities";
 import type { ChatEvent, ChatSessionSummary } from "../ws/protocol";
 
 /** Mirrors coordinator's agent/tools.ts's ToolResult shape — duplicated here
@@ -41,6 +42,20 @@ export type CoordinatorToFlowHost =
    * for the editor's entity autocomplete and the chat/agent's
    * `hass_entities` MCP tool. See Supervisor.queryHassEntities(). */
   | { type: "hass.entities.query"; requestId: number }
+  /** Same borrowed-connection pattern as hass.entities.query, for one
+   * entity's full current state — backs the chat/agent's `hass_get_state`
+   * MCP tool. */
+  | { type: "hass.state.query"; requestId: number; entity: string }
+  /** And for the write side — backs the agent's `hass_call_service` MCP
+   * tool. `dryRun` is decided coordinator-side (the process-wide
+   * FLOWBUN_DRY_RUN, never overridable by the model — see coordinator's
+   * agent/tools.ts) and passed through to performHassAction verbatim. */
+  | {
+      type: "hass.action.request";
+      requestId: number;
+      call: ActionCall;
+      dryRun: boolean;
+    }
   | { type: "shutdown" };
 
 // ---------- flow-host -> coordinator (Bun.spawn ipc) ----------
@@ -72,6 +87,18 @@ export type FlowHostToCoordinator =
       ok: false;
       error: string;
     }
+  /** Reply to "hass.state.query" — `reading` is undefined for an entity HA
+   * doesn't know (a valid answer, not an error). */
+  | {
+      type: "hass.state.result";
+      requestId: number;
+      ok: true;
+      reading: EntityStateReading | undefined;
+    }
+  | { type: "hass.state.result"; requestId: number; ok: false; error: string }
+  /** Reply to "hass.action.request". */
+  | { type: "hass.action.result"; requestId: number; ok: true }
+  | { type: "hass.action.result"; requestId: number; ok: false; error: string }
   | { type: "log"; entries: LogRecord[] }
   /** A node's WorkerManager has given up on it permanently (its respawn
    * budget is exhausted -- see worker-manager.ts's MAX_RESPAWNS) — unlike a
@@ -181,7 +208,15 @@ export type FlowHostToWorker =
     }
   /** Reply to a Worker's own "hass.call". */
   | { type: "hass.call.result"; requestId: number; ok: true }
-  | { type: "hass.call.result"; requestId: number; ok: false; error: string };
+  | { type: "hass.call.result"; requestId: number; ok: false; error: string }
+  /** Reply to a Worker's own "hass.exposedEntities" — see
+   * hass/exposed-entities.ts's own doc comment on why this never carries an
+   * error variant (a failure degrades to an empty list instead). */
+  | {
+      type: "hass.exposedEntities.result";
+      requestId: number;
+      entities: ExposedEntitySummary[];
+    };
 
 // ---------- worker -> flow-host (postMessage) ----------
 export type WorkerToFlowHost =
@@ -209,4 +244,6 @@ export type WorkerToFlowHost =
    * flowbun/hass/client, then posts back "hass.read.result". */
   | { type: "hass.read"; requestId: number; entity: string }
   /** Same relay, for the write side (flowbun/hass/action's performHassAction). */
-  | { type: "hass.call"; requestId: number; call: ActionCall; dryRun: boolean };
+  | { type: "hass.call"; requestId: number; call: ActionCall; dryRun: boolean }
+  /** Same relay, for flowbun/hass/exposed-entities's listExposedEntities. */
+  | { type: "hass.exposedEntities"; requestId: number; assistant: string };

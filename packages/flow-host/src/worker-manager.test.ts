@@ -59,6 +59,45 @@ const noopLog: Logger = {
   error: () => {},
 };
 
+const SLOW_TRANSFORM_BLOCK = `
+import { defineBlock } from "flowbun";
+export default defineBlock({
+  name: "@test/slow-transform",
+  config: {},
+  inputs: { go: {} },
+  outputs: { done: {} },
+  async process() {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return { done: {} };
+  },
+});
+`;
+
+function fakeTransformNode(blockModulePath: string): LoadedNode {
+  return {
+    nodeId: "n1",
+    block: {
+      name: "@test/slow-transform",
+      config: {},
+      inputs: { go: {} },
+      outputs: { done: {} },
+      // Only needsWorker()'s presence check reads this in-memory stub — the
+      // real process() that actually runs lives in the on-disk block file
+      // at blockModulePath, imported fresh inside the Worker (same pattern
+      // as fakeNode's own subscribe stub above).
+      async process() {
+        return undefined;
+      },
+    },
+    blockSpecifier: "slow-transform",
+    blockModulePath,
+    config: {},
+    // biome-ignore lint/suspicious/noExplicitAny: not exercised by this test
+    blockState: {} as any,
+    disabled: false,
+  };
+}
+
 function fakeNode(blockModulePath: string): LoadedNode {
   return {
     nodeId: "n1",
@@ -193,5 +232,31 @@ describe("WorkerManager respawn / death reporting", () => {
     // else arrived after the first (and only expected) death report.
     await new Promise((r) => setTimeout(r, 200));
     expect(deadNodes).toEqual(["n1"]);
+  });
+});
+
+describe("WorkerManager exec timeout override", () => {
+  test("a per-call timeoutMs actually governs when exec() gives up, independent of the module's own default", async () => {
+    writeFileSync(join(dir, "slow-transform.ts"), SLOW_TRANSFORM_BLOCK);
+    const node = fakeTransformNode(join(dir, "slow-transform.ts"));
+    const flow = fakeFlow(node);
+    manager = new WorkerManager(flow, dir, noopLog);
+    await manager.startAll();
+
+    const requestId = manager.allocRequestId();
+    const start = Date.now();
+    // The block itself takes 300ms — a 50ms override must reject well
+    // before that, proving req.timeoutMs (not the 10s module default) is
+    // what's actually governing the timer.
+    await expect(
+      manager.exec(node.nodeId, requestId, {
+        inputs: { go: {} },
+        port: "go",
+        traceId: "t1",
+        seq: 1,
+        timeoutMs: 50,
+      }),
+    ).rejects.toThrow(/worker exec timeout/);
+    expect(Date.now() - start).toBeLessThan(250);
   });
 });

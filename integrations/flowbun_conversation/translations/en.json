@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Flowbun",
+        "description": "Point this at the @http/in endpoint of your flowbun voice flow (see the voice-assist package), e.g. http://flowbun.local:8130/converse",
+        "data": {
+          "url": "Endpoint URL",
+          "token": "Bearer token (must match the @http/in node's token config)",
+          "timeout": "Reply timeout (seconds)"
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "That doesn't look like a valid http(s) URL."
+    }
+  }
+}

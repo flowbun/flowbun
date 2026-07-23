@@ -12,6 +12,7 @@ function fakeAgentConfig(): AgentConfig {
     fullAccess: false,
     maxTurns: 6,
     timeoutMs: 30_000,
+    persistSession: false,
   };
 }
 

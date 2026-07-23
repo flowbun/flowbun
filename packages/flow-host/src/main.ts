@@ -7,7 +7,8 @@ import {
   openStateDb,
   Router,
 } from "flowbun";
-import { listHassEntities } from "flowbun/hass/client";
+import { performHassAction } from "flowbun/hass/action";
+import { listHassEntities, readEntityState } from "flowbun/hass/client";
 import type {
   CoordinatorToFlowHost,
   FlowHostToCoordinator,
@@ -103,6 +104,48 @@ async function main(): Promise<void> {
         (err) =>
           send({
             type: "hass.entities.result",
+            requestId: msg.requestId,
+            ok: false,
+            error: String(err),
+          }),
+      );
+    } else if (msg.type === "hass.state.query") {
+      // Same borrowed-connection pattern as hass.entities.query above —
+      // read-only, safe regardless of dry-run.
+      readEntityState(msg.entity).then(
+        (reading) =>
+          send({
+            type: "hass.state.result",
+            requestId: msg.requestId,
+            ok: true,
+            reading,
+          }),
+        (err) =>
+          send({
+            type: "hass.state.result",
+            requestId: msg.requestId,
+            ok: false,
+            error: String(err),
+          }),
+      );
+    } else if (msg.type === "hass.action.request") {
+      // The write side of the borrowed connection — dryRun was already
+      // decided coordinator-side (see ipc/protocol.ts); logged here so the
+      // call shows up in this flow's own log stream like any @hass/action.
+      logger.info("hass.action.relayed", {
+        call: msg.call,
+        dryRun: msg.dryRun,
+      });
+      performHassAction(msg.call, msg.dryRun).then(
+        () =>
+          send({
+            type: "hass.action.result",
+            requestId: msg.requestId,
+            ok: true,
+          }),
+        (err) =>
+          send({
+            type: "hass.action.result",
             requestId: msg.requestId,
             ok: false,
             error: String(err),

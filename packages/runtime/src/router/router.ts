@@ -7,14 +7,38 @@ import type { Envelope, LoadedFlow, QueuedDelivery } from "./types";
  * arriving at one named input port, with `inputs` containing only that port's
  * value. See block.ts's doc comment on `defineBlock` for the full rationale.
  *
- * Delivery is a simple sequential drain loop (concurrency 1) — deterministic
- * trace ordering, correct for home-automation message rates. This is a
- * deliberate Phase-1 simplification, not a throughput design.
+ * Delivery is concurrent ACROSS nodes but sequential WITHIN one node: each
+ * node gets its own FIFO queue and its own independent drain loop (see
+ * `nodeQueues`/`nodeDrains` below), so when one node's output fans out to
+ * several different destination nodes, those destinations execute truly
+ * concurrently — each one's `executor.execute()` call (a real Worker
+ * round-trip, or a real HTTP/IPC call for a relay block) can be in flight at
+ * the same wall-clock time as its siblings', instead of queued behind them.
+ * A single node's OWN successive deliveries stay strictly ordered, though:
+ * `ctx.state.block`/`ctx.state.flow`/`ctx.state.global` are exposed to block
+ * authors as a plain get-then-set API (see state/state-api.ts — `set()`
+ * itself is one atomic SQL upsert, but a block doing "read a key, compute,
+ * write it back" spans two separate `await`s), and plenty of real blocks in
+ * this codebase do exactly that (voice_gate's own conversation-history
+ * append, among others). Re-entering the same node's process() concurrently
+ * would turn that ordinary read-modify-write pattern into a lost-update race
+ * — something no existing block author had to defend against, since the
+ * router was fully single-concurrency until now. Serializing same-node
+ * deliveries preserves that guarantee while still delivering genuine
+ * parallelism for the case that actually matters for throughput: sibling
+ * branches of a fan-out, and independent chains triggered around the same
+ * time.
+ *
+ * This does NOT protect state shared ACROSS different nodes (two distinct
+ * blocks both doing read-modify-write on the same flow/global-scope key) —
+ * that was only ever accidentally safe before, as a side effect of the
+ * entire router being single-threaded; a flow deliberately designed that way
+ * needs its own coordination now, same as any genuinely concurrent system.
  */
 export class Router {
   private seq = 0;
-  private queue: QueuedDelivery[] = [];
-  private drainPromise: Promise<void> | null = null;
+  private readonly nodeQueues = new Map<string, QueuedDelivery[]>();
+  private readonly nodeDrains = new Map<string, Promise<void>>();
   private readonly executor: NodeExecutor;
 
   constructor(
@@ -77,8 +101,22 @@ export class Router {
     return tid;
   }
 
-  waitForIdle(): Promise<void> {
-    return this.drainPromise ?? Promise.resolve();
+  /**
+   * Resolves once every currently-in-flight delivery, across every node's
+   * own queue, has settled — including deliveries spawned AFTER this was
+   * called as a result of ones already in flight (a fan-out reached mid-wait
+   * can itself spawn new per-node drains this method hasn't seen yet), which
+   * is why this re-snapshots `nodeDrains` in a loop rather than awaiting one
+   * fixed set: a single `Promise.all` over the initial snapshot could
+   * resolve before a late-spawned sibling or grandchild delivery has
+   * actually finished.
+   */
+  async waitForIdle(): Promise<void> {
+    let pending = [...this.nodeDrains.values()];
+    while (pending.length > 0) {
+      await Promise.all(pending);
+      pending = [...this.nodeDrains.values()];
+    }
   }
 
   private enqueue(
@@ -95,7 +133,12 @@ export class Router {
       causationSeq,
       emittedAt: Date.now(),
     };
-    this.queue.push({ nodeId, port, payload, envelope });
+    const queue = this.nodeQueues.get(nodeId);
+    if (queue) {
+      queue.push({ nodeId, port, payload, envelope });
+    } else {
+      this.nodeQueues.set(nodeId, [{ nodeId, port, payload, envelope }]);
+    }
     this.log.debug("router.enqueue", {
       flow: this.flow.name,
       nodeId,
@@ -104,17 +147,29 @@ export class Router {
       traceId,
       causationSeq,
     });
-    if (!this.drainPromise) {
-      this.drainPromise = this.drain().finally(() => {
-        this.drainPromise = null;
+    // Only start a new drain if this node has none running — an existing
+    // drain's own while-loop re-checks its queue after every delivery, so it
+    // will pick up this just-pushed item on its own without needing a
+    // second, concurrently-running drain for the same node (which is
+    // exactly the case this class's own doc comment says must never happen).
+    if (!this.nodeDrains.has(nodeId)) {
+      const drainPromise = this.drainNode(nodeId).finally(() => {
+        this.nodeDrains.delete(nodeId);
       });
+      this.nodeDrains.set(nodeId, drainPromise);
     }
   }
 
-  private async drain(): Promise<void> {
-    for (let item = this.queue.shift(); item; item = this.queue.shift()) {
+  /** One node's own independent FIFO drain loop — see this class's own doc
+   * comment for why deliveries to the same node stay strictly ordered while
+   * different nodes' drain loops run fully concurrently with each other. */
+  private async drainNode(nodeId: string): Promise<void> {
+    const queue = this.nodeQueues.get(nodeId);
+    if (!queue) return;
+    for (let item = queue.shift(); item; item = queue.shift()) {
       await this.deliver(item);
     }
+    this.nodeQueues.delete(nodeId);
   }
 
   private async deliver(item: QueuedDelivery): Promise<void> {
@@ -185,7 +240,10 @@ export class Router {
     }
   }
 
-  /** Enqueues `value` to every node wired to `sourceNodeId.sourcePort`. Shared by deliver()'s post-process fan-out and emitFromSource(). */
+  /** Enqueues `value` to every node wired to `sourceNodeId.sourcePort` —
+   * each destination gets its own per-node queue (see enqueue()), so
+   * multiple destinations from one fan-out run concurrently with each
+   * other. Shared by deliver()'s post-process fan-out and emitFromSource(). */
   private fanOut(
     sourceNodeId: string,
     sourcePort: string,

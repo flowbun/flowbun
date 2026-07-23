@@ -17,6 +17,7 @@ export default defineBlock<AgentConfig, { prompt: unknown }, AgentOutputs>({
     fullAccess: false,
     maxTurns: DEFAULT_MAX_TURNS,
     timeoutMs: DEFAULT_TIMEOUT_MS,
+    persistSession: false,
   },
   inputs: { prompt: {} as unknown },
   outputs: { result: {} as AgentOutputs["result"] },

@@ -54,6 +54,7 @@ function fakeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     fullAccess: false,
     maxTurns: 6,
     timeoutMs: 30,
+    persistSession: false,
     ...overrides,
   };
 }
@@ -362,5 +363,266 @@ describe("createAgentNodeCaller", () => {
 
     expect(mcpServersSeen).toHaveLength(2);
     expect(mcpServersSeen[0]).not.toBe(mcpServersSeen[1]);
+  });
+});
+
+/**
+ * The persistSession (hot session) path: one streaming-input query() kept
+ * alive across calls. The fake queryFn here consumes the pushed user
+ * messages and answers one result per message — echoing the prompt back so
+ * tests can prove which session answered which call.
+ */
+describe("createAgentNodeCaller persistSession", () => {
+  function echoStreamingQuery(queryCalls: unknown[][] = []) {
+    return ((params: {
+      prompt: AsyncIterable<{ message: { content: string } }>;
+      options: { abortController: AbortController };
+    }) => {
+      queryCalls.push([params]);
+      return (async function* (): AsyncGenerator<SDKMessage> {
+        for await (const user of params.prompt) {
+          const text = user.message.content;
+          if (text.includes("HANG")) {
+            await new Promise(() => {});
+          }
+          if (text.includes("FAIL")) {
+            yield resultError("error_during_execution");
+          } else {
+            yield {
+              ...(resultSuccess(`echo: ${text}`) as object),
+            } as SDKMessage;
+          }
+        }
+      })();
+    }) as unknown as typeof query;
+  }
+
+  const hotConfig = (overrides: Partial<AgentConfig> = {}) =>
+    fakeConfig({ persistSession: true, timeoutMs: 5000, ...overrides });
+
+  test("two calls share one warm query() session, and both get their own answers", async () => {
+    const queryCalls: unknown[][] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir },
+      noopCallTool,
+      echoStreamingQuery(queryCalls),
+    );
+
+    const first = await caller.call("flow1", "n1", "turn one", hotConfig());
+    const second = await caller.call("flow1", "n1", "turn two", hotConfig());
+
+    expect(queryCalls).toHaveLength(1);
+    expect(first).toMatchObject({ ok: true, text: "echo: turn one" });
+    expect(second).toMatchObject({ ok: true, text: "echo: turn two" });
+  });
+
+  test("a config change abandons the old session and boots a fresh one", async () => {
+    const queryCalls: unknown[][] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir },
+      noopCallTool,
+      echoStreamingQuery(queryCalls),
+    );
+
+    await caller.call("flow1", "n1", "a", hotConfig());
+    await caller.call(
+      "flow1",
+      "n1",
+      "b",
+      hotConfig({ systemPrompt: "be terse now" }),
+    );
+
+    expect(queryCalls).toHaveLength(2);
+  });
+
+  test("different nodes never share a session", async () => {
+    const queryCalls: unknown[][] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir },
+      noopCallTool,
+      echoStreamingQuery(queryCalls),
+    );
+
+    await caller.call("flow1", "n1", "a", hotConfig());
+    await caller.call("flow1", "n2", "b", hotConfig());
+
+    expect(queryCalls).toHaveLength(2);
+  });
+
+  test("a failed turn recycles the session — the next call gets a fresh one", async () => {
+    const queryCalls: unknown[][] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir },
+      noopCallTool,
+      echoStreamingQuery(queryCalls),
+    );
+
+    const failed = await caller.call("flow1", "n1", "FAIL now", hotConfig());
+    expect(failed.ok).toBe(false);
+
+    const next = await caller.call("flow1", "n1", "recovered?", hotConfig());
+    expect(next).toMatchObject({ ok: true, text: "echo: recovered?" });
+    expect(queryCalls).toHaveLength(2);
+  });
+
+  test("a hot turn that hangs times out, kills the session, and the next call recovers", async () => {
+    const queryCalls: unknown[][] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir },
+      noopCallTool,
+      echoStreamingQuery(queryCalls),
+    );
+
+    const hung = await caller.call(
+      "flow1",
+      "n1",
+      "HANG please",
+      hotConfig({ timeoutMs: 20 }),
+    );
+    expect(hung.ok).toBe(false);
+    if (!hung.ok) expect(hung.error).toContain("timed out");
+
+    const next = await caller.call(
+      "flow1",
+      "n1",
+      "alive again?",
+      hotConfig({ timeoutMs: 20 }),
+    );
+    expect(next).toMatchObject({ ok: true, text: "echo: alive again?" });
+    expect(queryCalls).toHaveLength(2);
+  });
+
+  test("cancelForFlow tears the hot session down; the next call boots fresh", async () => {
+    const queryCalls: unknown[][] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir },
+      noopCallTool,
+      echoStreamingQuery(queryCalls),
+    );
+
+    await caller.call("flow1", "n1", "before restart", hotConfig());
+    caller.cancelForFlow("flow1");
+    const after = await caller.call(
+      "flow1",
+      "n1",
+      "after restart",
+      hotConfig(),
+    );
+
+    expect(after).toMatchObject({ ok: true, text: "echo: after restart" });
+    expect(queryCalls).toHaveLength(2);
+  });
+});
+
+/**
+ * The stall watchdog: a hung SDK stream (no messages at all) gets its
+ * session killed and the call automatically retried once on a fresh one —
+ * distinct from the per-turn timeout, which means "the work was too slow"
+ * and is deliberately not retried.
+ */
+describe("createAgentNodeCaller stall watchdog", () => {
+  /** Session 1 boots then goes silent forever; every later session echoes.
+   * Works for both prompt shapes (string = one-shot, iterable = hot). */
+  function hangFirstSessionQuery(queryCalls: unknown[] = []) {
+    return ((params: {
+      prompt: string | AsyncIterable<{ message: { content: string } }>;
+    }) => {
+      const sessionIndex = queryCalls.length;
+      queryCalls.push(params);
+      return (async function* (): AsyncGenerator<SDKMessage> {
+        if (typeof params.prompt === "string") {
+          if (sessionIndex === 0) await new Promise(() => {});
+          yield resultSuccess(`echo: ${params.prompt}`);
+          return;
+        }
+        for await (const user of params.prompt) {
+          if (sessionIndex === 0) await new Promise(() => {});
+          yield resultSuccess(`echo: ${user.message.content}`);
+        }
+      })();
+    }) as unknown as typeof query;
+  }
+
+  test("a stalled hot session is killed and the request retried fresh, answering normally", async () => {
+    const queryCalls: unknown[] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir, stallTimeoutMs: 25 },
+      noopCallTool,
+      hangFirstSessionQuery(queryCalls),
+    );
+
+    const result = await caller.call(
+      "flow1",
+      "n1",
+      "hello?",
+      fakeConfig({ persistSession: true, timeoutMs: 5000 }),
+    );
+
+    expect(result).toMatchObject({ ok: true, text: "echo: hello?" });
+    expect(queryCalls).toHaveLength(2);
+  });
+
+  test("a stalled one-shot call is also retried once", async () => {
+    const queryCalls: unknown[] = [];
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir, stallTimeoutMs: 25 },
+      noopCallTool,
+      hangFirstSessionQuery(queryCalls),
+    );
+
+    const result = await caller.call(
+      "flow1",
+      "n1",
+      "hello?",
+      fakeConfig({ timeoutMs: 5000 }),
+    );
+
+    expect(result).toMatchObject({ ok: true, text: "echo: hello?" });
+    expect(queryCalls).toHaveLength(2);
+  });
+
+  test("a permanently-stalled SDK fails after exactly one retry, not an endless loop", async () => {
+    const queryCalls: unknown[] = [];
+    const alwaysHang = ((params: unknown) => {
+      queryCalls.push(params);
+      return (async function* (): AsyncGenerator<SDKMessage> {
+        await new Promise(() => {});
+        yield resultSuccess("never");
+      })();
+    }) as unknown as typeof query;
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir, stallTimeoutMs: 25 },
+      noopCallTool,
+      alwaysHang,
+    );
+
+    const result = await caller.call(
+      "flow1",
+      "n1",
+      "hello?",
+      fakeConfig({ persistSession: true, timeoutMs: 5000 }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("stalled");
+    expect(queryCalls).toHaveLength(2);
+  });
+
+  test("fullAccess calls never trip the stall watchdog — a hang hits the turn timeout instead", async () => {
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir, stallTimeoutMs: 10 },
+      noopCallTool,
+      hangFirstSessionQuery(),
+    );
+
+    const result = await caller.call(
+      "flow1",
+      "n1",
+      "hello?",
+      fakeConfig({ fullAccess: true, timeoutMs: 60 }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("timed out");
   });
 });

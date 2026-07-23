@@ -7,7 +7,9 @@ import {
   flowCreateHandler,
   flowDeleteHandler,
   flowReadHandler,
+  hassCallServiceHandler,
   hassEntitiesHandler,
+  hassGetStateHandler,
   listBlocksHandler,
   listFlowsHandler,
   type ToolResult,
@@ -74,6 +76,16 @@ export async function dispatchToolCall(
       );
     case "hass_entities":
       return hassEntitiesHandler(deps);
+    case "hass_get_state":
+      return hassGetStateHandler(
+        deps,
+        args as Parameters<typeof hassGetStateHandler>[1],
+      );
+    case "hass_call_service":
+      return hassCallServiceHandler(
+        deps,
+        args as Parameters<typeof hassCallServiceHandler>[1],
+      );
     default:
       return {
         ok: false,

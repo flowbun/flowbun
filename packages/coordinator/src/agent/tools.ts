@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { Wiring } from "flowbun";
+import type { ActionCall } from "flowbun/hass/action";
+import type { EntityStateReading } from "flowbun/hass/client";
 import type {
   BlockPaletteEntry,
   FlowEntry,
@@ -38,6 +40,24 @@ export interface AgentToolDeps {
   deleteBlock: (file: string) => Promise<void>;
   deleteFlow: (file: string) => Promise<void>;
   listHassEntities: () => Promise<HassEntitySummary[]>;
+  /** See Supervisor.queryHassState — errors are transport failures, an
+   * undefined reading is HA genuinely not knowing the entity. */
+  queryHassState: (
+    entity: string,
+  ) => Promise<
+    | { ok: true; reading: EntityStateReading | undefined }
+    | { ok: false; error: string }
+  >;
+  /** See Supervisor.requestHassAction. Whether this is a dry-run is decided
+   * by the DEPLOYMENT (main.ts wires in the process-wide FLOWBUN_DRY_RUN),
+   * never by the tool's caller — the model cannot opt out of dry-run. */
+  callHassService: (
+    call: ActionCall,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  /** The process-wide dry-run flag, surfaced so hass_call_service can SAY
+   * "dry-run, nothing really happened" in its summary instead of letting
+   * the model believe a suppressed call took effect. */
+  isDryRun: () => boolean;
   markSelfWrite: (path: string) => void;
 }
 
@@ -296,4 +316,68 @@ export async function hassEntitiesHandler(
 ): Promise<ToolResult> {
   const entities = await deps.listHassEntities();
   return { ok: true, summary: JSON.stringify(entities) };
+}
+
+export async function hassGetStateHandler(
+  deps: AgentToolDeps,
+  input: { entity: string },
+): Promise<ToolResult> {
+  const result = await deps.queryHassState(input.entity);
+  if (!result.ok) {
+    return {
+      ok: false,
+      summary: `Could not read "${input.entity}"`,
+      error: result.error,
+    };
+  }
+  if (result.reading === undefined) {
+    return {
+      ok: false,
+      summary: `Home Assistant has no entity "${input.entity}"`,
+      error: `unknown entity "${input.entity}" — use hass_entities to list real entity ids`,
+    };
+  }
+  return { ok: true, summary: JSON.stringify(result.reading) };
+}
+
+export async function hassCallServiceHandler(
+  deps: AgentToolDeps,
+  input: {
+    domain: string;
+    service: string;
+    entity_id?: string | string[];
+    data?: Record<string, unknown>;
+  },
+): Promise<ToolResult> {
+  if (!input.domain || !input.service) {
+    return {
+      ok: false,
+      summary: "hass_call_service needs both a domain and a service",
+      error: "missing domain and/or service",
+    };
+  }
+  const call: ActionCall = {
+    domain: input.domain,
+    service: input.service,
+    ...(input.entity_id ? { target: { entity_id: input.entity_id } } : {}),
+    ...(input.data ? { data: input.data } : {}),
+  };
+  const result = await deps.callHassService(call);
+  const label = `${input.domain}.${input.service}${
+    input.entity_id ? ` on ${JSON.stringify(input.entity_id)}` : ""
+  }`;
+  if (!result.ok) {
+    return {
+      ok: false,
+      summary: `Failed to call ${label}`,
+      error: result.error ?? "unknown error",
+    };
+  }
+  // Never let the model mistake a suppressed dry-run call for a real one.
+  return deps.isDryRun()
+    ? {
+        ok: true,
+        summary: `DRY-RUN: ${label} was accepted but NOT actually executed (this deployment has FLOWBUN_DRY_RUN enabled)`,
+      }
+    : { ok: true, summary: `Called ${label}` };
 }

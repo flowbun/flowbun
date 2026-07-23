@@ -63,10 +63,15 @@ export async function runTypecheck(
         // on the implicit fallback for just this one is a trap for the
         // next person who assumes this list is exhaustive.
         "flowbun/hass/client": [`${runtimeSrcRel}/hass/client.ts`],
+        "flowbun/hass/exposed-entities": [
+          `${runtimeSrcRel}/hass/exposed-entities.ts`,
+        ],
+        "flowbun/http/in": [`${runtimeSrcRel}/http/in.ts`],
         "flowbun/core/scheduler": [`${runtimeSrcRel}/core/scheduler.ts`],
         "flowbun/core/inject": [`${runtimeSrcRel}/core/inject.ts`],
         "flowbun/core/debug": [`${runtimeSrcRel}/core/debug.ts`],
         "flowbun/ai/agent": [`${runtimeSrcRel}/ai/agent.ts`],
+        "flowbun/ai/voice-timers": [`${runtimeSrcRel}/ai/voice-timers.ts`],
         "flowbun/auth": [`${runtimeSrcRel}/auth/session.ts`],
       },
     },

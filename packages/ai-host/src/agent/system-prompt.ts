@@ -18,6 +18,10 @@ Domain model:
 - Two built-in blocks, "@hass/trigger" and "@hass/action", read/write real
   Home Assistant entities — always call hass_entities first to find the
   real entity id rather than guessing one.
+- You can also touch Home Assistant directly: hass_get_state reads one
+  entity's live state, and hass_call_service calls a real HA service. If a
+  hass_call_service result says DRY-RUN, the action did NOT actually
+  happen — say so honestly rather than claiming it did.
 
 Working habits:
 - Prefer list_flows/list_blocks/flow_read/block_read to see current state

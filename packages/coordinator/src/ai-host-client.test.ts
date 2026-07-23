@@ -25,6 +25,9 @@ function fakeDeps(): AgentToolDeps {
     deleteBlock: async () => {},
     deleteFlow: async () => {},
     listHassEntities: async () => [],
+    queryHassState: async () => ({ ok: true, reading: undefined }),
+    callHassService: async () => ({ ok: true }),
+    isDryRun: () => true,
     markSelfWrite: () => {},
   };
 }
@@ -36,6 +39,7 @@ function fakeAgentConfig(): AgentConfig {
     fullAccess: false,
     maxTurns: 6,
     timeoutMs: 30_000,
+    persistSession: false,
   };
 }
 

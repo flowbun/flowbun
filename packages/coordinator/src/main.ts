@@ -9,6 +9,7 @@ import {
   runTypecheck,
   WiringSchema,
 } from "flowbun";
+import { isDryRun } from "flowbun/hass/client";
 import runtimePkg from "flowbun/package.json";
 import type {
   FlowEntry,
@@ -205,6 +206,12 @@ async function main(): Promise<void> {
     // This coordinator holds no HA connection of its own anymore (see
     // hass/client.ts) — relayed to whichever flow-host is running instead.
     listHassEntities: () => supervisor.queryHassEntities(),
+    queryHassState: (entity) => supervisor.queryHassState(entity),
+    // The deployment's own FLOWBUN_DRY_RUN decides whether this really
+    // executes — passed in here, never taken from the tool call, so the
+    // model cannot opt out of dry-run (see AgentToolDeps' doc comments).
+    callHassService: (call) => supervisor.requestHassAction(call, isDryRun()),
+    isDryRun,
     markSelfWrite: (path: string) => recentSelfWrites.set(path, Date.now()),
   };
 

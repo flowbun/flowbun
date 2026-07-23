@@ -136,6 +136,43 @@ export interface RelayBlockDef<
   kind: "relay";
 }
 
+/**
+ * A block that is both a source and a transform at once: `subscribe` runs at
+ * init exactly like a source's (same Worker, same lifecycle, same `emit`
+ * fan-out through router.emitFromSource), AND ordinary wire delivery still
+ * invokes `process()` like a transform. This exists for boundary blocks that
+ * hold a long-lived external endpoint open — an HTTP listener (@http/in), a
+ * websocket, a TCP socket — where a message *arrives* outside any
+ * request-response cycle (subscribe/emit) but the flow must also be able to
+ * *answer back into* that same live endpoint (process). A plain
+ * source + separate transform pair can't express that: the two would run in
+ * different Workers with no shared in-memory handle to the one open socket.
+ *
+ * Both hooks run in the same Worker (or the same thread, in the in-process
+ * topology), so module-level state in the block's own file — e.g. a
+ * pending-HTTP-responses map — is the intended way for process() to reach
+ * what subscribe() opened. Note the Phase 1 in-process demo runner never
+ * calls a duplex block's subscribe (it's a bespoke milestone script, not a
+ * general host); the real coordinator/flow-host topology is what hosts
+ * these.
+ */
+export interface DuplexBlockDef<
+  Config,
+  Inputs extends PortShape,
+  Outputs extends PortShape,
+> extends BlockDefBase<Config, Inputs, Outputs> {
+  kind: "duplex";
+  subscribe(
+    ctx: BlockContext<Config>,
+    emit: (port: keyof Outputs & string, payload: unknown) => void,
+  ): Promise<() => void>;
+  process(
+    inputs: FiringInputs<Inputs>,
+    ctx: BlockContext<Config>,
+    // biome-ignore lint/suspicious/noConfusingVoidType: intentional, same reasoning as TransformBlockDef's process
+  ): Promise<Partial<Outputs> | void>;
+}
+
 export type BlockDef<
   Config,
   Inputs extends PortShape,
@@ -143,7 +180,8 @@ export type BlockDef<
 > =
   | TransformBlockDef<Config, Inputs, Outputs>
   | SourceBlockDef<Config, Inputs, Outputs>
-  | RelayBlockDef<Config, Inputs, Outputs>;
+  | RelayBlockDef<Config, Inputs, Outputs>
+  | DuplexBlockDef<Config, Inputs, Outputs>;
 
 /**
  * `inputs`/`outputs` are phantom-typed: authors write `{} as Shape`, and the
@@ -173,6 +211,13 @@ export function defineBlock<
 >(
   def: RelayBlockDef<Config, Inputs, Outputs>,
 ): RelayBlockDef<Config, Inputs, Outputs>;
+export function defineBlock<
+  Config,
+  Inputs extends PortShape,
+  Outputs extends PortShape,
+>(
+  def: DuplexBlockDef<Config, Inputs, Outputs>,
+): DuplexBlockDef<Config, Inputs, Outputs>;
 export function defineBlock(def: AnyBlockDef): AnyBlockDef {
   return def;
 }

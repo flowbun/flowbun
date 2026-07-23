@@ -19,9 +19,13 @@ function isBlockDef(
   // A transform (the default kind — `kind` omitted or "transform") must have
   // a real process(); a source or relay never calls process() at all (see
   // block.ts's SourceBlockDef/RelayBlockDef doc comments), so it's valid
-  // without one.
+  // without one. A duplex needs both hooks — that's its whole definition
+  // (see block.ts's DuplexBlockDef doc comment).
   if (d.kind === undefined || d.kind === "transform") {
     return typeof d.process === "function";
+  }
+  if (d.kind === "duplex") {
+    return typeof d.process === "function" && typeof d.subscribe === "function";
   }
   return d.kind === "source" || d.kind === "relay";
 }
@@ -114,9 +118,10 @@ async function scanBlockDir(
 }
 
 /**
- * Scans `packages/runtime/src/blocks/*.ts` (the seven built-in blocks —
+ * Scans `packages/runtime/src/blocks/*.ts` (the nine built-in blocks —
  * `@hass/trigger`, `@hass/action`, `@hass/read`, `@core/scheduler`,
- * `@core/inject`, `@core/debug`, `@ai/agent`) and `<dataDir>/blocks/*.ts`
+ * `@core/inject`, `@core/debug`, `@ai/agent`, `@http/in`, `@ai/openai_agent`)
+ * and `<dataDir>/blocks/*.ts`
  * (everything a user has written), registering both sets through the exact
  * same scan/import/validate path — see scanBlockDir's own doc comment.
  */

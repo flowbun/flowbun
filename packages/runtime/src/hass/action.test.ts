@@ -17,6 +17,8 @@ function fakeHass(
     call,
     refBy: { id: () => ({ onUpdate: () => () => {} }) },
     entity: { listEntities: () => [], getCurrentState: () => undefined },
+    // biome-ignore lint/suspicious/noExplicitAny: test double, socket isn't exercised by these tests
+    socket: { sendMessage: async () => undefined as any },
   };
 }
 

@@ -26,7 +26,7 @@ function toCallToolResult(result: AgentToolResult): CallToolResult {
 }
 
 /**
- * Bundles the same 11 tools the coordinator's agent/tools.ts implements,
+ * Bundles the same 13 tools the coordinator's agent/tools.ts implements,
  * all under one MCP server named "flowbun" — tool names the model sees are
  * `mcp__flowbun__<name>`. Every tool call is relayed to the coordinator over
  * IPC via `callTool` rather than touching any state directly (this process
@@ -136,6 +136,36 @@ export function createAgentMcpServer(callTool: ToolCaller) {
         {},
         async () => toCallToolResult(await callTool("hass_entities", {})),
         { annotations: { readOnlyHint: true } },
+      ),
+      tool(
+        "hass_get_state",
+        "Read one Home Assistant entity's full current state and attributes. Use hass_entities first if unsure of the exact entity id.",
+        {
+          entity: z.string().describe('Entity id, e.g. "light.kitchen"'),
+        },
+        async (args) =>
+          toCallToolResult(await callTool("hass_get_state", args)),
+        { annotations: { readOnlyHint: true } },
+      ),
+      tool(
+        "hass_call_service",
+        "Call a Home Assistant service (turn things on/off, set positions/temperatures, run scripts...). If the deployment is in dry-run mode the call is accepted but NOT executed, and the result says so — report that honestly rather than claiming the action happened.",
+        {
+          domain: z.string().describe('Service domain, e.g. "light"'),
+          service: z.string().describe('Service name, e.g. "turn_on"'),
+          entity_id: z
+            .union([z.string(), z.array(z.string())])
+            .optional()
+            .describe("Target entity id(s)"),
+          data: z
+            .record(z.string(), z.unknown())
+            .optional()
+            .describe(
+              'Extra service data, e.g. {"brightness_pct": 40} — never put entity_id here',
+            ),
+        },
+        async (args) =>
+          toCallToolResult(await callTool("hass_call_service", args)),
       ),
     ],
   });

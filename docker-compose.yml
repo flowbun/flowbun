@@ -6,6 +6,9 @@ services:
     ports:
       - "4200:4200"
       - "8787:8787"
+      # voice-assist package's @http/in endpoint — Home Assistant's
+      # flowbun_conversation integration POSTs here
+      - "8130:8130"
     volumes:
       - ./data:/app/data
       # Sibling checkout of flowbun-registry, mounted read-only so the

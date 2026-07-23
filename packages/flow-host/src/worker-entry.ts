@@ -3,6 +3,8 @@ import { blockScopeKey, makeStateScope, openStateDb } from "flowbun";
 import { setHassCallTransport } from "flowbun/hass/action";
 import type { EntityStateReading } from "flowbun/hass/client";
 import { setHassReadTransport } from "flowbun/hass/client";
+import type { ExposedEntitySummary } from "flowbun/hass/exposed-entities";
+import { setExposedEntitiesTransport } from "flowbun/hass/exposed-entities";
 import type { FlowHostToWorker, WorkerToFlowHost } from "flowbun/ipc";
 
 let blockDef: AnyBlockDef | undefined;
@@ -30,6 +32,10 @@ const pendingHassCalls = new Map<
   number,
   { resolve: () => void; reject: (e: Error) => void }
 >();
+const pendingExposedEntities = new Map<
+  number,
+  { resolve: (entities: ExposedEntitySummary[]) => void }
+>();
 
 setHassReadTransport({
   readEntity: (entity) =>
@@ -46,6 +52,15 @@ setHassCallTransport({
       const requestId = nextHassRequestId++;
       pendingHassCalls.set(requestId, { resolve, reject });
       post({ type: "hass.call", requestId, call, dryRun });
+    }),
+});
+
+setExposedEntitiesTransport({
+  list: (assistant) =>
+    new Promise((resolve) => {
+      const requestId = nextHassRequestId++;
+      pendingExposedEntities.set(requestId, { resolve });
+      post({ type: "hass.exposedEntities", requestId, assistant });
     }),
 });
 
@@ -78,7 +93,10 @@ addEventListener("message", async (event: MessageEvent<FlowHostToWorker>) => {
           flow: makeStateScope(db, "flow", msg.flowName),
           global: makeStateScope(db, "global", ""),
         };
-        if (blockDef.kind === "source" && blockDef.subscribe) {
+        if (
+          (blockDef.kind === "source" || blockDef.kind === "duplex") &&
+          blockDef.subscribe
+        ) {
           // No triggering input message exists yet at this point — traceId/
           // seq/port are placeholders, meaningless for a subscribe call, kept
           // only so BlockContext stays one uniform shape across every block
@@ -168,6 +186,13 @@ addEventListener("message", async (event: MessageEvent<FlowHostToWorker>) => {
       pendingHassCalls.delete(msg.requestId);
       if (msg.ok) pending.resolve();
       else pending.reject(new Error(msg.error));
+      break;
+    }
+    case "hass.exposedEntities.result": {
+      const pending = pendingExposedEntities.get(msg.requestId);
+      if (!pending) return;
+      pendingExposedEntities.delete(msg.requestId);
+      pending.resolve(msg.entities);
       break;
     }
   }

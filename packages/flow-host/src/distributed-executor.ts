@@ -5,6 +5,7 @@ import type {
   NodeExecutor,
 } from "flowbun";
 import type { AgentConfig } from "flowbun/ai/agent";
+import { splitAgentInput } from "flowbun/ai/agent";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { WorkerManager } from "./worker-manager";
 
@@ -14,6 +15,25 @@ import type { WorkerManager } from "./worker-manager";
 // carrying a specific "timed out after Nms" error. This is only a backstop
 // against total silence (coordinator or ai-host process hung/crashed).
 const AGENT_CALL_TIMEOUT_MARGIN_MS = 15_000;
+
+// WorkerManager's own WORKER_EXEC_TIMEOUT_MS (10s) is a hard kill-and-respawn
+// ceiling applied to every ordinary node's exec() call — fine for the vast
+// majority of blocks, which never come close to it, but a real problem for
+// any block whose own legitimate work can take longer (network calls to a
+// slow endpoint) and that already exposes its own configurable `timeoutMs`.
+// Without an override, WorkerManager would silently kill and respawn that
+// node's Worker at exactly 10s regardless of what the block's own config
+// says — discarding an in-flight, possibly-about-to-succeed response — and
+// three such kills within WorkerManager's own 60s window (MAX_RESPAWNS)
+// permanently marks the node dead. So: any non-relay node whose resolved
+// config has a numeric `timeoutMs` field gets that value (plus this margin,
+// mirroring AGENT_CALL_TIMEOUT_MARGIN_MS's identical reasoning for the relay
+// path above) passed through as WorkerManager's own per-call override
+// instead of the blind default — the block's own internal budget becomes
+// the real one, and WorkerManager's timer is purely a backstop against total
+// silence. Every other block's config has no field by that exact name, so
+// this is a no-op for them.
+const WORKER_TIMEOUT_MARGIN_MS = 2_000;
 
 interface PendingAgentCall {
   resolve: (result: {
@@ -69,11 +89,16 @@ export class DistributedExecutor implements NodeExecutor {
     }
 
     const requestId = this.deps.workerManager.allocRequestId();
+    const configTimeoutMs = (node.config as { timeoutMs?: unknown }).timeoutMs;
     return this.deps.workerManager.exec(node.nodeId, requestId, {
       inputs: req.inputs,
       port: req.port,
       traceId: req.traceId,
       seq: req.seq,
+      timeoutMs:
+        typeof configTimeoutMs === "number"
+          ? configTimeoutMs + WORKER_TIMEOUT_MARGIN_MS
+          : undefined,
     });
   }
 
@@ -82,12 +107,18 @@ export class DistributedExecutor implements NodeExecutor {
     config: AgentConfig,
     input: unknown,
   ): Promise<Record<string, unknown>> {
+    // `meta` is correlation state for the wires AROUND this node (e.g.
+    // @http/in's requestId riding through to the reply), not part of the
+    // prompt — held back here and re-attached to the result below, so the
+    // model never sees it and the ai-host never has to know it exists. See
+    // splitAgentInput's own doc comment for the exact input convention.
+    const { forwarded, meta } = splitAgentInput(input);
     const requestId = this.nextAgentRequestId++;
     this.deps.send({
       type: "agent.call",
       requestId,
       nodeId,
-      input,
+      input: forwarded,
       config,
     });
     const marginMs =
@@ -106,7 +137,9 @@ export class DistributedExecutor implements NodeExecutor {
       this.pendingAgentCalls.set(requestId, {
         resolve: (result) => {
           clearTimeout(timer);
-          resolve({ result });
+          resolve({
+            result: meta === undefined ? result : { ...result, meta },
+          });
         },
         reject: (e) => {
           clearTimeout(timer);

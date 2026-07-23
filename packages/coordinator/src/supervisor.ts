@@ -1,4 +1,6 @@
 import { join } from "node:path";
+import type { ActionCall } from "flowbun/hass/action";
+import type { EntityStateReading } from "flowbun/hass/client";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { FlowStatus, HassEntitySummary } from "flowbun/ws";
 import type { AiHostClient } from "./ai-host-client";
@@ -65,6 +67,29 @@ export class Supervisor {
     }
   >();
   private nextEntityQueryRequestId = 1;
+  // Same borrowed-connection pattern again, for the agent's hass_get_state /
+  // hass_call_service MCP tools (see agent/tools.ts) — one pending map per
+  // request/response pair, same lifecycle as pendingEntityQueries.
+  private pendingStateQueries = new Map<
+    number,
+    {
+      flowName: string;
+      resolve: (
+        result:
+          | { ok: true; reading: EntityStateReading | undefined }
+          | { ok: false; error: string },
+      ) => void;
+    }
+  >();
+  private nextStateQueryRequestId = 1;
+  private pendingActionRequests = new Map<
+    number,
+    {
+      flowName: string;
+      resolve: (result: { ok: boolean; error?: string }) => void;
+    }
+  >();
+  private nextActionRequestId = 1;
 
   constructor(
     private readonly dataDir: string,
@@ -178,6 +203,26 @@ export class Supervisor {
         );
         break;
       }
+      case "hass.state.result": {
+        const pending = this.pendingStateQueries.get(msg.requestId);
+        if (!pending) break;
+        this.pendingStateQueries.delete(msg.requestId);
+        pending.resolve(
+          msg.ok
+            ? { ok: true, reading: msg.reading }
+            : { ok: false, error: msg.error },
+        );
+        break;
+      }
+      case "hass.action.result": {
+        const pending = this.pendingActionRequests.get(msg.requestId);
+        if (!pending) break;
+        this.pendingActionRequests.delete(msg.requestId);
+        pending.resolve(
+          msg.ok ? { ok: true } : { ok: false, error: msg.error },
+        );
+        break;
+      }
       case "flow.fireNode.result": {
         const pending = this.pendingFires.get(msg.requestId);
         if (!pending) break;
@@ -284,6 +329,16 @@ export class Supervisor {
     for (const [id, pending] of this.pendingEntityQueries) {
       if (pending.flowName !== rt.flowName) continue;
       this.pendingEntityQueries.delete(id);
+      pending.resolve({ ok: false, error });
+    }
+    for (const [id, pending] of this.pendingStateQueries) {
+      if (pending.flowName !== rt.flowName) continue;
+      this.pendingStateQueries.delete(id);
+      pending.resolve({ ok: false, error });
+    }
+    for (const [id, pending] of this.pendingActionRequests) {
+      if (pending.flowName !== rt.flowName) continue;
+      this.pendingActionRequests.delete(id);
       pending.resolve({ ok: false, error });
     }
   }
@@ -430,6 +485,75 @@ export class Supervisor {
       this.pendingEntityQueries.set(requestId, {
         flowName: rt.flowName,
         resolve: (result) => resolve(result.ok ? result.entities : []),
+      });
+    });
+  }
+
+  /** One entity's full current state, over the same borrowed connection as
+   * queryHassEntities. Unlike that one this DOESN'T degrade a transport
+   * failure to a silent non-answer: "no running flow" and "flow died
+   * mid-query" surface as errors, because the caller (the agent's
+   * hass_get_state tool) needs to distinguish "HA doesn't know this
+   * entity" (ok, reading undefined) from "I couldn't ask HA at all". */
+  queryHassState(
+    entity: string,
+  ): Promise<
+    | { ok: true; reading: EntityStateReading | undefined }
+    | { ok: false; error: string }
+  > {
+    const rt = [...this.flows.values()].find(
+      (r) => r.subprocess && r.status.kind === "running",
+    );
+    if (!rt?.subprocess) {
+      return Promise.resolve({
+        ok: false,
+        error: "no running flow-host to query Home Assistant through",
+      });
+    }
+    const requestId = this.nextStateQueryRequestId++;
+    rt.subprocess.send({
+      type: "hass.state.query",
+      requestId,
+      entity,
+    } satisfies CoordinatorToFlowHost);
+    return new Promise((resolve) => {
+      this.pendingStateQueries.set(requestId, {
+        flowName: rt.flowName,
+        resolve,
+      });
+    });
+  }
+
+  /** The write side of the borrowed connection — backs the agent's
+   * hass_call_service MCP tool. `dryRun` is the caller's (agent/tools.ts
+   * passes the process-wide FLOWBUN_DRY_RUN verbatim; the model can never
+   * override it). Errors rather than no-ops when no flow-host is running:
+   * a service call that silently went nowhere is exactly the failure mode
+   * this codebase's own @hass/action work went out of its way to kill. */
+  requestHassAction(
+    call: ActionCall,
+    dryRun: boolean,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const rt = [...this.flows.values()].find(
+      (r) => r.subprocess && r.status.kind === "running",
+    );
+    if (!rt?.subprocess) {
+      return Promise.resolve({
+        ok: false,
+        error: "no running flow-host to call Home Assistant through",
+      });
+    }
+    const requestId = this.nextActionRequestId++;
+    rt.subprocess.send({
+      type: "hass.action.request",
+      requestId,
+      call,
+      dryRun,
+    } satisfies CoordinatorToFlowHost);
+    return new Promise((resolve) => {
+      this.pendingActionRequests.set(requestId, {
+        flowName: rt.flowName,
+        resolve,
       });
     });
   }

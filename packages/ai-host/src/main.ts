@@ -56,7 +56,13 @@ async function main(): Promise<void> {
   );
 
   const agentNodeCaller = createAgentNodeCaller(
-    { claudeConfigDir, cwd: DATA_DIR },
+    {
+      claudeConfigDir,
+      cwd: DATA_DIR,
+      stallTimeoutMs: Bun.env.FLOWBUN_AGENT_STALL_TIMEOUT_MS
+        ? Number(Bun.env.FLOWBUN_AGENT_STALL_TIMEOUT_MS)
+        : undefined,
+    },
     callTool,
   );
 

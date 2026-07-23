@@ -1,3 +1,4 @@
+import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentConfig } from "flowbun/ai/agent";
 import {
@@ -38,12 +39,97 @@ export interface AgentNodeCallerOptions {
   /** Pinned cwd for every query() call — see runner.ts's own note on why
    * this must stay stable. */
   cwd: string;
+  /** How long the SDK's message stream may go COMPLETELY silent mid-call
+   * before the call is declared stalled — the CLI subprocess is killed and
+   * the request automatically retried once on a fresh session. Distinct
+   * from the per-turn timeout: a busy turn keeps emitting messages (tool
+   * use, assistant chunks) and never trips this; only a genuinely hung SDK
+   * does. Disabled for fullAccess calls, whose long Bash/WebFetch tool runs
+   * are legitimately silent. Default DEFAULT_STALL_TIMEOUT_MS; tests inject
+   * a tiny value. */
+  stallTimeoutMs?: number;
 }
 
 type QueryFn = typeof query;
 
 function promptFromInput(input: unknown): string {
   return typeof input === "string" ? input : JSON.stringify(input ?? null);
+}
+
+// A hot session is recycled (torn down so the next call boots fresh) after
+// this many user turns — the session's conversation history is real context
+// that grows every turn, and an unbounded session eventually gets slow and
+// expensive, which is exactly what persistSession exists to avoid. 50 turns
+// is hours of household voice use; one slow boot-turn per 50 is a fine trade.
+const HOT_SESSION_MAX_USER_TURNS = 50;
+// And torn down after sitting idle this long — a household asleep overnight
+// shouldn't keep a CLI subprocess pinned for no one.
+const HOT_SESSION_IDLE_MS = 60 * 60_000;
+
+// See AgentNodeCallerOptions.stallTimeoutMs. 12s comfortably clears a cold
+// SDK boot (~4-5s to the first system message) and any bounded MCP tool
+// round-trip, while still leaving room for a fresh-session retry to finish
+// inside a voice flow's ~25s reply budget.
+export const DEFAULT_STALL_TIMEOUT_MS = 12_000;
+
+/** Thrown by the read loops when the stream stalls; call() keys its
+ * retry-once behavior off this marker string, so keep it distinctive. */
+const STALL_MARKER = "no SDK activity for";
+
+function stallError(nodeId: string, stallMs: number): Error {
+  return new Error(
+    `agent node "${nodeId}" stalled: ${STALL_MARKER} ${stallMs}ms — killing the session`,
+  );
+}
+
+const STALLED = Symbol("stalled");
+
+/** Races one stream read against the stall clock. The clock only ever runs
+ * while a read is pending — every message that arrives starts a fresh race —
+ * which is exactly "restart if the SDK stops responding", not "restart if
+ * the turn is slow". */
+function raceStall<T>(
+  read: Promise<T>,
+  stallMs: number,
+): Promise<T | typeof STALLED> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(STALLED), stallMs);
+    read.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/**
+ * One live streaming-input query() session, kept warm across calls. The
+ * whole point: the SDK's per-call overhead (CLI subprocess boot, MCP
+ * handshake, system-prompt processing) is paid once at creation, and every
+ * later turn is just push-a-message / read-until-result — measured at
+ * roughly 3-4s saved per voice-assistant turn.
+ *
+ * The flip side, documented rather than hidden: a hot session is ONE
+ * conversation. Every turn shares the session's accumulated history —
+ * across satellites, across HA conversation_ids. For a household voice
+ * assistant that's usually a feature; a node that needs strictly isolated
+ * calls should leave persistSession off.
+ */
+interface HotSession {
+  fingerprint: string;
+  abortController: AbortController;
+  push(text: string): void;
+  stream: AsyncGenerator<unknown, void>;
+  busy: boolean;
+  userTurns: number;
+  dead: boolean;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  untrack: () => void;
 }
 
 /**
@@ -59,6 +145,7 @@ export function createAgentNodeCaller(
   queryFn: QueryFn = query,
 ): AgentNodeCaller {
   const controllersByFlow = new Map<string, Set<AbortController>>();
+  const hotSessions = new Map<string, HotSession>();
 
   function track(flowName: string, controller: AbortController): () => void {
     let set = controllersByFlow.get(flowName);
@@ -73,11 +160,301 @@ export function createAgentNodeCaller(
     };
   }
 
+  function destroyHotSession(key: string, session: HotSession): void {
+    session.dead = true;
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    session.abortController.abort();
+    session.untrack();
+    if (hotSessions.get(key) === session) hotSessions.delete(key);
+  }
+
   function cancelForFlow(flowName: string): void {
+    for (const [key, session] of hotSessions) {
+      if (key.startsWith(`${flowName}::`)) destroyHotSession(key, session);
+    }
     const set = controllersByFlow.get(flowName);
     if (!set) return;
     for (const controller of set) controller.abort();
     controllersByFlow.delete(flowName);
+  }
+
+  function buildQueryOptions(
+    config: AgentConfig,
+    maxTurns: number,
+    abortController: AbortController,
+  ) {
+    // MCP server fresh per query() — see mcp-server.ts's own comment on why
+    // a shared instance would throw on the second concurrent connect.
+    const mcpServer = createAgentMcpServer(callTool);
+    return {
+      cwd: opts.cwd,
+      model: config.model || undefined,
+      maxTurns,
+      abortController,
+      // Bounded mode still gets the flowbun MCP tools (same scope as
+      // the interactive chat agent) — only fullAccess additionally
+      // inherits the SDK's full built-in tool set (Bash/Read/Write/
+      // Edit/WebFetch/WebSearch/...) by omitting `tools` entirely.
+      ...(config.fullAccess ? {} : { tools: [] }),
+      mcpServers: { flowbun: mcpServer },
+      allowedTools: ["mcp__flowbun__*"],
+      ...(config.fullAccess
+        ? {
+            permissionMode: "bypassPermissions" as const,
+            allowDangerouslySkipPermissions: true,
+          }
+        : {}),
+      systemPrompt: {
+        type: "preset" as const,
+        preset: "claude_code" as const,
+        append: config.systemPrompt,
+      },
+    };
+  }
+
+  /** Maps one SDK message to a settled AgentCallResult, or null for any
+   * intermediate message — shared by the one-shot consume loop and the hot
+   * session's read-until-result loop. */
+  // biome-ignore lint/suspicious/noExplicitAny: the SDK message union is wide; both call sites narrow on .type/.subtype exactly like the pre-hot-session code did
+  function resultFromMessage(message: any): AgentCallResult | null {
+    if (message?.type !== "result") return null;
+    if (message.subtype === "success") {
+      return {
+        ok: true,
+        text: message.result,
+        costUsd: message.total_cost_usd,
+        durationMs: message.duration_ms,
+        numTurns: message.num_turns,
+      };
+    }
+    return {
+      ok: false,
+      error: message.errors?.join("; ") || message.subtype,
+    };
+  }
+
+  function turnTimeout(
+    nodeId: string,
+    timeoutMs: number,
+    abortController: AbortController,
+  ): { promise: Promise<never>; cancel: () => void } {
+    let timer: ReturnType<typeof setTimeout>;
+    const promise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abortController.abort();
+        reject(
+          new Error(`agent node "${nodeId}" timed out after ${timeoutMs}ms`),
+        );
+      }, timeoutMs);
+    });
+    // A rejected-but-raceless timeout must never surface as an unhandled
+    // rejection (the hot path cancels it after a fast result).
+    promise.catch(() => {});
+    return { promise, cancel: () => clearTimeout(timer) };
+  }
+
+  async function oneShotCall(
+    flowName: string,
+    nodeId: string,
+    promptText: string,
+    config: AgentConfig,
+    timeoutMs: number,
+    maxTurns: number,
+  ): Promise<AgentCallResult> {
+    const abortController = new AbortController();
+    const untrack = track(flowName, abortController);
+
+    try {
+      const stream = queryFn({
+        prompt: promptText,
+        options: buildQueryOptions(config, maxTurns, abortController),
+      });
+
+      // fullAccess turns run long, legitimately silent tools (Bash,
+      // WebFetch) — the stall watchdog only guards bounded calls.
+      const stallMs = config.fullAccess
+        ? 0
+        : (opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS);
+      const timeout = turnTimeout(nodeId, timeoutMs, abortController);
+      const consume = (async (): Promise<AgentCallResult> => {
+        const iterator = stream[Symbol.asyncIterator]();
+        while (true) {
+          const next = stallMs
+            ? await raceStall(iterator.next(), stallMs)
+            : await iterator.next();
+          if (next === STALLED) {
+            abortController.abort();
+            throw stallError(nodeId, stallMs);
+          }
+          if (next.done) {
+            return { ok: false, error: "agent stream ended without a result" };
+          }
+          const settled = resultFromMessage(next.value);
+          if (settled) return settled;
+        }
+      })();
+      // If `timeout` wins the race, `consume` is still running in the
+      // background against an aborted stream — it will settle (resolve or
+      // reject) once the abort propagates, but by then nothing awaits it;
+      // this swallows that so it can never surface as an unhandled
+      // rejection.
+      consume.catch(() => {});
+
+      try {
+        return await Promise.race([consume, timeout.promise]);
+      } finally {
+        timeout.cancel();
+      }
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    } finally {
+      untrack();
+    }
+  }
+
+  function createHotSession(
+    flowName: string,
+    fingerprint: string,
+    config: AgentConfig,
+    maxTurns: number,
+  ): HotSession {
+    const abortController = new AbortController();
+    const untrack = track(flowName, abortController);
+
+    const queue: string[] = [];
+    let notify: (() => void) | null = null;
+    async function* userMessages(): AsyncGenerator<SDKUserMessage> {
+      while (!abortController.signal.aborted) {
+        while (queue.length === 0 && !abortController.signal.aborted) {
+          await new Promise<void>((resolve) => {
+            notify = resolve;
+          });
+        }
+        if (abortController.signal.aborted) return;
+        const text = queue.shift() as string;
+        yield {
+          type: "user",
+          message: { role: "user", content: text },
+          parent_tool_use_id: null,
+          session_id: "",
+        } as unknown as SDKUserMessage;
+      }
+    }
+
+    const stream = queryFn({
+      prompt: userMessages(),
+      options: buildQueryOptions(
+        config,
+        // In streaming-input mode the SDK counts turns across the whole
+        // session, not per pushed message — scaled by the session's own
+        // user-turn budget so a healthy session never trips it, while a
+        // runaway single turn is still bounded by the per-turn timeout
+        // abort below.
+        maxTurns * HOT_SESSION_MAX_USER_TURNS,
+        abortController,
+      ),
+    }) as AsyncGenerator<unknown, void>;
+
+    return {
+      fingerprint,
+      abortController,
+      push: (text) => {
+        queue.push(text);
+        notify?.();
+        notify = null;
+      },
+      stream,
+      busy: false,
+      userTurns: 0,
+      dead: false,
+      idleTimer: null,
+      untrack,
+    };
+  }
+
+  async function hotCall(
+    flowName: string,
+    nodeId: string,
+    promptText: string,
+    config: AgentConfig,
+    timeoutMs: number,
+    maxTurns: number,
+  ): Promise<AgentCallResult> {
+    const key = `${flowName}::${nodeId}`;
+    const fingerprint = JSON.stringify(config);
+
+    let session = hotSessions.get(key);
+    if (session?.busy) {
+      // A second call while a turn is in flight (shouldn't happen from one
+      // flow node — the router serializes — but don't build on that): leave
+      // the hot session alone and answer this one cold.
+      return oneShotCall(
+        flowName,
+        nodeId,
+        promptText,
+        config,
+        timeoutMs,
+        maxTurns,
+      );
+    }
+    if (session && (session.dead || session.fingerprint !== fingerprint)) {
+      destroyHotSession(key, session);
+      session = undefined;
+    }
+    if (!session) {
+      session = createHotSession(flowName, fingerprint, config, maxTurns);
+      hotSessions.set(key, session);
+    }
+
+    session.busy = true;
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    const timeout = turnTimeout(nodeId, timeoutMs, session.abortController);
+    try {
+      session.push(promptText);
+      const stallMs = config.fullAccess
+        ? 0
+        : (opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS);
+      const readUntilResult = (async (): Promise<AgentCallResult> => {
+        while (true) {
+          const next = stallMs
+            ? await raceStall(session.stream.next(), stallMs)
+            : await session.stream.next();
+          if (next === STALLED) throw stallError(nodeId, stallMs);
+          if (next.done) {
+            return { ok: false, error: "agent stream ended without a result" };
+          }
+          const settled = resultFromMessage(next.value);
+          if (settled) return settled;
+        }
+      })();
+      readUntilResult.catch(() => {});
+
+      const result = await Promise.race([readUntilResult, timeout.promise]);
+      session.userTurns++;
+      if (!result.ok || session.userTurns >= HOT_SESSION_MAX_USER_TURNS) {
+        // Any per-turn failure poisons the shared stream state — recycle
+        // rather than risk the next turn reading this one's leftovers. The
+        // turn-budget recycle is just context hygiene (see HotSession's
+        // own doc comment).
+        destroyHotSession(key, session);
+      }
+      return result;
+    } catch (err) {
+      destroyHotSession(key, session);
+      return { ok: false, error: String(err) };
+    } finally {
+      timeout.cancel();
+      session.busy = false;
+      if (!session.dead) {
+        session.idleTimer = setTimeout(() => {
+          const current = hotSessions.get(key);
+          if (current && !current.busy) destroyHotSession(key, current);
+        }, HOT_SESSION_IDLE_MS);
+        // Bun supports unref on timers — an idle hot session must never be
+        // the thing keeping the ai-host process (or a test run) alive.
+        (session.idleTimer as unknown as { unref?: () => void }).unref?.();
+      }
+    }
   }
 
   async function call(
@@ -100,84 +477,31 @@ export function createAgentNodeCaller(
     const maxTurns =
       config.maxTurns ||
       (config.fullAccess ? DEFAULT_FULL_ACCESS_MAX_TURNS : DEFAULT_MAX_TURNS);
+    const promptText = promptFromInput(input);
 
-    // Fresh per call, never shared — see mcp-server.ts's own comment on why
-    // a shared instance would throw on the second concurrent call.
-    const mcpServer = createAgentMcpServer(callTool);
-    const abortController = new AbortController();
-    const untrack = track(flowName, abortController);
-
-    try {
-      const stream = queryFn({
-        prompt: promptFromInput(input),
-        options: {
-          cwd: opts.cwd,
-          model: config.model || undefined,
-          maxTurns,
-          abortController,
-          // Bounded mode still gets the flowbun MCP tools (same scope as
-          // the interactive chat agent) — only fullAccess additionally
-          // inherits the SDK's full built-in tool set (Bash/Read/Write/
-          // Edit/WebFetch/WebSearch/...) by omitting `tools` entirely.
-          ...(config.fullAccess ? {} : { tools: [] }),
-          mcpServers: { flowbun: mcpServer },
-          allowedTools: ["mcp__flowbun__*"],
-          ...(config.fullAccess
-            ? {
-                permissionMode: "bypassPermissions" as const,
-                allowDangerouslySkipPermissions: true,
-              }
-            : {}),
-          systemPrompt: {
-            type: "preset",
-            preset: "claude_code",
-            append: config.systemPrompt,
-          },
-        },
-      });
-
-      const timeout = new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          abortController.abort();
-          reject(
-            new Error(`agent node "${nodeId}" timed out after ${timeoutMs}ms`),
+    const attempt = () =>
+      config.persistSession
+        ? hotCall(flowName, nodeId, promptText, config, timeoutMs, maxTurns)
+        : oneShotCall(
+            flowName,
+            nodeId,
+            promptText,
+            config,
+            timeoutMs,
+            maxTurns,
           );
-        }, timeoutMs);
-      });
 
-      const consume = (async (): Promise<AgentCallResult> => {
-        for await (const message of stream) {
-          if (message.type === "result") {
-            if (message.subtype === "success") {
-              return {
-                ok: true,
-                text: message.result,
-                costUsd: message.total_cost_usd,
-                durationMs: message.duration_ms,
-                numTurns: message.num_turns,
-              };
-            }
-            return {
-              ok: false,
-              error: message.errors?.join("; ") || message.subtype,
-            };
-          }
-        }
-        return { ok: false, error: "agent stream ended without a result" };
-      })();
-      // If `timeout` wins the race, `consume` is still running in the
-      // background against an aborted stream — it will settle (resolve or
-      // reject) once the abort propagates, but by then nothing awaits it;
-      // this swallows that so it can never surface as an unhandled
-      // rejection.
-      consume.catch(() => {});
-
-      return await Promise.race([consume, timeout]);
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    } finally {
-      untrack();
+    const result = await attempt();
+    // A stall means the SDK subprocess hung, not that the request was hard —
+    // the hung session is already dead (aborted by the read loop / hotCall's
+    // catch), so one automatic retry on a fresh session is the "restart it"
+    // behavior, and usually turns a would-be spoken failure into a normal
+    // answer. Slow-but-alive turns (per-turn timeout) are NOT retried: those
+    // failed because the work itself exceeded its budget.
+    if (!result.ok && result.error.includes(STALL_MARKER)) {
+      return attempt();
     }
+    return result;
   }
 
   return { call, cancelForFlow };

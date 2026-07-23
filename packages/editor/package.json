@@ -2,6 +2,7 @@
   "name": "editor",
   "version": "0.1.0",
   "private": true,
+  "license": "LGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "start": "bun run src/server.ts",

@@ -30,6 +30,24 @@ export interface SimpleHass {
     listEntities(): string[];
     getCurrentState(entityId: string): SimpleEntityState | undefined;
   };
+  /**
+   * DA's raw websocket passthrough — the one escape hatch out of the
+   * otherwise-curated SimpleHass surface, used only by
+   * hass/exposed-entities.ts to reach `config/entity_registry/list` (no
+   * higher-level DA API exists for entity-registry/exposure data). Default
+   * `waitForResponse: true` behavior confirmed against DA's own
+   * websocket-api.service: on success it resolves with the raw
+   * `message.result` payload; on a `success:false` reply it logs and never
+   * settles at all (same lost-ack failure mode ./action.ts's own
+   * performHassAction documents and races against a timeout) — every
+   * caller through this must do the same rather than trust it to reject.
+   */
+  socket: {
+    sendMessage<T = unknown>(
+      data: { type: string; [key: string]: unknown },
+      waitForResponse?: boolean,
+    ): Promise<T>;
+  };
 }
 
 export interface HassEntitySummary {

@@ -8,6 +8,7 @@ import type {
 } from "flowbun";
 import { performHassAction } from "flowbun/hass/action";
 import { readEntityState } from "flowbun/hass/client";
+import { listExposedEntities } from "flowbun/hass/exposed-entities";
 import type { FlowHostToWorker, WorkerToFlowHost } from "flowbun/ipc";
 
 const WORKER_INIT_TIMEOUT_MS = 5_000;
@@ -38,8 +39,10 @@ interface Pending {
  * source with no `subscribe` at all (only @core/inject today) never runs
  * any code autonomously — it's only ever fired externally via
  * router.emitFromSource(), which doesn't touch a Worker either. Every other
- * node — every transform, and every subscribe-bearing source that isn't
- * flow-host-hosted (e.g. @core/scheduler) — gets a real Worker.
+ * node — every transform, every duplex (whose subscribe AND process both
+ * need the same Worker — see block.ts's DuplexBlockDef doc comment), and
+ * every subscribe-bearing source that isn't flow-host-hosted (e.g.
+ * @core/scheduler) — gets a real Worker.
  */
 function needsWorker(block: AnyBlockDef): boolean {
   if (block.kind === "relay") return false;
@@ -225,6 +228,18 @@ export class WorkerManager {
               managed.worker.postMessage(reply);
             },
           );
+        } else if (msg.type === "hass.exposedEntities") {
+          // listExposedEntities() never throws/rejects (see its own doc
+          // comment — every failure degrades to []), so there's no error
+          // branch to relay here, unlike hass.read/hass.call above.
+          listExposedEntities(msg.assistant).then((entities) => {
+            const reply: FlowHostToWorker = {
+              type: "hass.exposedEntities.result",
+              requestId: msg.requestId,
+              entities,
+            };
+            managed.worker.postMessage(reply);
+          });
         }
       },
     );
@@ -331,6 +346,13 @@ export class WorkerManager {
       port: string;
       traceId: string;
       seq: number;
+      /** Per-call override of WORKER_EXEC_TIMEOUT_MS — see DistributedExecutor's
+       * own doc comment on where this comes from and why it exists (a node
+       * whose own work can legitimately run longer than the 10s default,
+       * e.g. a slow network call with its own configurable budget). Absent
+       * for the overwhelming majority of nodes, which get the plain
+       * default. */
+      timeoutMs?: number;
     },
   ): Promise<Record<string, unknown> | undefined> {
     const managed = this.workers.get(nodeId);
@@ -341,7 +363,7 @@ export class WorkerManager {
         this.pending.delete(requestId);
         reject(new Error(`worker exec timeout: ${nodeId}`));
         void this.respawn(managed);
-      }, WORKER_EXEC_TIMEOUT_MS);
+      }, req.timeoutMs ?? WORKER_EXEC_TIMEOUT_MS);
       this.pending.set(requestId, {
         nodeId,
         resolve: (o) => {
@@ -355,7 +377,19 @@ export class WorkerManager {
           reject(e);
         },
       });
-      const msg: FlowHostToWorker = { type: "exec", requestId, ...req };
+      // timeoutMs governs this method's own kill-timer above only — the
+      // Worker's exec message has no use for it and FlowHostToWorker's
+      // "exec" variant doesn't declare the field, so it's deliberately
+      // excluded here rather than spread in.
+      const { inputs, port, traceId, seq } = req;
+      const msg: FlowHostToWorker = {
+        type: "exec",
+        requestId,
+        inputs,
+        port,
+        traceId,
+        seq,
+      };
       managed.worker.postMessage(msg);
     });
   }

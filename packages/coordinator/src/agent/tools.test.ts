@@ -20,7 +20,9 @@ import {
   flowCreateHandler,
   flowDeleteHandler,
   flowReadHandler,
+  hassCallServiceHandler,
   hassEntitiesHandler,
+  hassGetStateHandler,
   listBlocksHandler,
   listFlowsHandler,
   wiringMutateHandler,
@@ -102,6 +104,19 @@ beforeEach(() => {
     deleteBlock: async () => {},
     deleteFlow: async () => {},
     listHassEntities: async () => [{ id: "light.kitchen" }],
+    queryHassState: async (entity) =>
+      entity === "light.kitchen"
+        ? {
+            ok: true,
+            reading: {
+              entity: "light.kitchen",
+              state: "on",
+              attributes: { brightness: 128 },
+            },
+          }
+        : { ok: true, reading: undefined },
+    callHassService: async () => ({ ok: true }),
+    isDryRun: () => false,
     markSelfWrite: () => {},
   };
 });
@@ -251,5 +266,87 @@ describe("read-only tools", () => {
   test("hassEntitiesHandler returns the entity list", async () => {
     const result = await hassEntitiesHandler(deps);
     expect(JSON.parse(result.summary)).toEqual([{ id: "light.kitchen" }]);
+  });
+
+  test("hassGetStateHandler returns a known entity's reading", async () => {
+    const result = await hassGetStateHandler(deps, {
+      entity: "light.kitchen",
+    });
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(result.summary)).toEqual({
+      entity: "light.kitchen",
+      state: "on",
+      attributes: { brightness: 128 },
+    });
+  });
+
+  test("hassGetStateHandler distinguishes an unknown entity from a transport failure", async () => {
+    const unknown = await hassGetStateHandler(deps, { entity: "light.nope" });
+    expect(unknown.ok).toBe(false);
+    expect(unknown.error).toContain("unknown entity");
+
+    deps.queryHassState = async () => ({ ok: false, error: "no flow-host" });
+    const transport = await hassGetStateHandler(deps, {
+      entity: "light.kitchen",
+    });
+    expect(transport.ok).toBe(false);
+    expect(transport.error).toBe("no flow-host");
+  });
+});
+
+describe("hassCallServiceHandler", () => {
+  test("builds the ActionCall and reports a live call plainly", async () => {
+    const calls: unknown[] = [];
+    deps.callHassService = async (call) => {
+      calls.push(call);
+      return { ok: true };
+    };
+    const result = await hassCallServiceHandler(deps, {
+      domain: "light",
+      service: "turn_on",
+      entity_id: "light.kitchen",
+      data: { brightness_pct: 40 },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.summary).toContain("Called light.turn_on");
+    expect(calls).toEqual([
+      {
+        domain: "light",
+        service: "turn_on",
+        target: { entity_id: "light.kitchen" },
+        data: { brightness_pct: 40 },
+      },
+    ]);
+  });
+
+  test("a dry-run deployment is called out loudly in the summary", async () => {
+    deps.isDryRun = () => true;
+    const result = await hassCallServiceHandler(deps, {
+      domain: "light",
+      service: "turn_on",
+      entity_id: "light.kitchen",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.summary).toContain("DRY-RUN");
+    expect(result.summary).toContain("NOT actually executed");
+  });
+
+  test("missing domain/service and transport failures both surface as errors", async () => {
+    const missing = await hassCallServiceHandler(deps, {
+      domain: "",
+      service: "turn_on",
+    });
+    expect(missing.ok).toBe(false);
+
+    deps.callHassService = async () => ({
+      ok: false,
+      error: "no running flow-host",
+    });
+    const failed = await hassCallServiceHandler(deps, {
+      domain: "light",
+      service: "turn_on",
+    });
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toBe("no running flow-host");
   });
 });

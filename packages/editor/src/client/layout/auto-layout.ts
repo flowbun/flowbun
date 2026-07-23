@@ -29,18 +29,38 @@ export function autoLayout(
   const queue = ids.filter((id) => (indeg.get(id) ?? 0) === 0);
   for (const id of queue) depth.set(id, 0);
 
-  while (queue.length > 0) {
+  // Longest-path relaxation only terminates on a DAG: in an acyclic graph, no
+  // node needs relaxing more than |V|-1 times before every value is final. A
+  // wire cycle (this codebase has at least one on purpose — e.g. an
+  // @http/in-based flow's own reject-shortcut wire routes back to the same
+  // node that started the request) has no well-defined longest path at all,
+  // so without a bound this simply never converges: a source reachable from
+  // outside the cycle keeps pumping ever-larger depth values around it,
+  // forever. That's not a hypothetical — deleting one wire in a real,
+  // already-deployed flow (dropping a node's indegree to zero right next to
+  // an existing cycle) hung the whole editor tab solid, since this runs
+  // synchronously on every wiring update (see useFlowGraph.ts). Capping
+  // total relaxations at ids.length^2 (a safe upper bound for any graph that
+  // WOULD converge) guarantees termination regardless of topology; whatever
+  // hasn't settled by then falls through to the isolated/cyclic-fallback
+  // pass below. Layout is cosmetic only, so an imperfect column for a node
+  // caught in a cycle is a fine trade for "never hangs the tab."
+  const maxRelaxations = ids.length * ids.length;
+  let relaxations = 0;
+  while (queue.length > 0 && relaxations < maxRelaxations) {
     const id = queue.shift();
     if (id === undefined) break;
     for (const next of adj.get(id) ?? []) {
+      relaxations++;
       const candidate = (depth.get(id) ?? 0) + 1;
       if (candidate > (depth.get(next) ?? -1)) {
         depth.set(next, candidate);
         queue.push(next);
       }
+      if (relaxations >= maxRelaxations) break;
     }
   }
-  // Isolated or cyclic-fallback nodes that never got visited.
+  // Isolated, never-visited, or cycle-abandoned-mid-relaxation nodes.
   for (const id of ids) if (!depth.has(id)) depth.set(id, 0);
 
   const columns = new Map<number, string[]>();
