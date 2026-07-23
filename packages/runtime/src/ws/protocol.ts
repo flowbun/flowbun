@@ -316,6 +316,10 @@ export type ClientToServer =
   | { type: "block.write"; requestId: string; file: string; source: string }
   | { type: "block.read"; requestId: string; file: string }
   | { type: "block.delete"; requestId: string; file: string }
+  // Copies any palette block (built-in or add-on, keyed by its internal
+  // `name`, since a built-in has no `file`) into a new, independently
+  // editable file under data/blocks/ — see coordinator's duplicateBlock.
+  | { type: "block.duplicate"; requestId: string; blockName: string }
   | { type: "flow.delete"; requestId: string; file: string }
   | { type: "flow.restart"; requestId: string; flow: string }
   | { type: "flow.fireNode"; requestId: string; flow: string; nodeId: string }
@@ -428,6 +432,12 @@ export type ServerToClient =
       /** The text actually written to disk — may differ from what the
        * client sent if it was reformatted by Biome on save. */
       source: string;
+      /** The block's own `name:` field as read back out of `source` —
+       * absent if it couldn't be found (e.g. a mid-edit save with no
+       * defineBlock call yet). Lets the block editor's name field reflect
+       * whatever's actually on disk, including a rename the client folded
+       * into `source` before sending. */
+      name?: string;
       /** Blocks have no snapshot/broadcast channel the way wiring files do
        * (see FlowEntry.undo) — the Monaco editor's undo/redo buttons read
        * this directly off every block.*Result instead. */
@@ -439,6 +449,7 @@ export type ServerToClient =
       requestId: string;
       ok: true;
       source: string;
+      name?: string;
       undo: UndoStatus;
     }
   | { type: "block.readResult"; requestId: string; ok: false; error: string }
@@ -447,6 +458,7 @@ export type ServerToClient =
       requestId: string;
       ok: true;
       source: string;
+      name?: string;
       typecheck: TypecheckOutcome;
       undo: UndoStatus;
     }
@@ -456,12 +468,32 @@ export type ServerToClient =
       requestId: string;
       ok: true;
       source: string;
+      name?: string;
       typecheck: TypecheckOutcome;
       undo: UndoStatus;
     }
   | { type: "block.redoResult"; requestId: string; ok: false; error: string }
   | { type: "block.deleteResult"; requestId: string; ok: true }
   | { type: "block.deleteResult"; requestId: string; ok: false; error: string }
+  | {
+      type: "block.duplicateResult";
+      requestId: string;
+      ok: true;
+      /** Filename actually used under data/blocks/ (server slugifies the
+       * generated name). */
+      file: string;
+      /** The generated, still-generic name ("@core/scheduler 2") — the
+       * caller opens the block editor on `file` so the user can rename it
+       * from there. */
+      name: string;
+      source: string;
+    }
+  | {
+      type: "block.duplicateResult";
+      requestId: string;
+      ok: false;
+      error: string;
+    }
   | { type: "flow.deleteResult"; requestId: string; ok: true }
   | { type: "flow.deleteResult"; requestId: string; ok: false; error: string }
   | { type: "flow.restartResult"; requestId: string; ok: true }

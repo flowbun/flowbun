@@ -49,6 +49,7 @@ function Shell() {
     file: string;
     name: string;
   } | null>(null);
+  const [blockActionError, setBlockActionError] = useState<string | null>(null);
   const [deleteFlowTarget, setDeleteFlowTarget] = useState<{
     file: string;
     name: string;
@@ -107,6 +108,28 @@ function Shell() {
     setPaletteOpen(false);
   }
 
+  // Copies any palette block — built-in or add-on — into a new, editable
+  // add-on file, then opens it straight in the Monaco editor so the user
+  // can give it a real name and start customizing (same "open what you just
+  // made" flow as NewBlockDialog's onCreated).
+  async function handleDuplicateBlock(blockName: string) {
+    setBlockActionError(null);
+    const r = await send({
+      type: "block.duplicate",
+      requestId: generateRequestId(),
+      blockName,
+    });
+    if (r.type !== "block.duplicateResult") {
+      setBlockActionError("unexpected response from server");
+      return;
+    }
+    if (r.ok) {
+      setBlockEditorFile(r.file);
+    } else {
+      setBlockActionError(r.error);
+    }
+  }
+
   function handleUndo() {
     if (!entry) return;
     navigate(entry.file, null); // the selected node may not exist post-undo
@@ -130,6 +153,18 @@ function Shell() {
   return (
     <>
       <ConnectionBanner connected={state.connected} />
+      {blockActionError && (
+        <div className="block-action-error-banner" role="alert">
+          {blockActionError}
+          <button
+            type="button"
+            onClick={() => setBlockActionError(null)}
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div
         ref={headerRef}
         className="app-header"
@@ -254,6 +289,7 @@ function Shell() {
             palette={state.palette}
             onOpenBlockEditor={setBlockEditorFile}
             onDeleteBlock={(file, name) => setDeleteBlockTarget({ file, name })}
+            onDuplicateBlock={handleDuplicateBlock}
             onAddBlock={isMobile ? handleAddBlockFromPalette : undefined}
             onCloseMobile={isMobile ? () => setPaletteOpen(false) : undefined}
             onNewBlock={() => setNewBlockOpen(true)}

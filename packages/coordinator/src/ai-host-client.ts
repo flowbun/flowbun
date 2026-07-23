@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { AgentConfig } from "flowbun/ai/agent";
+import type { AgentCallKind, AnyAgentConfig } from "flowbun/ai/agent";
 import type { AiHostToCoordinator, CoordinatorToAiHost } from "flowbun/ipc";
 import type { ChatEvent, ChatSessionSummary } from "flowbun/ws";
 import { dispatchToolCall } from "./agent/dispatch-tool-call";
@@ -37,7 +37,9 @@ export interface AiHostClient {
     flowName: string,
     nodeId: string,
     input: unknown,
-    config: AgentConfig,
+    config: AnyAgentConfig,
+    agentKind?: AgentCallKind,
+    deviceId?: string,
   ): Promise<AgentCallResult>;
   cancelForFlow(flowName: string): void;
   stop(): void;
@@ -256,12 +258,23 @@ export function createAiHostClient(opts: AiHostClientOptions): AiHostClient {
     flowName: string,
     nodeId: string,
     input: unknown,
-    config: AgentConfig,
+    config: AnyAgentConfig,
+    agentKind?: AgentCallKind,
+    deviceId?: string,
   ): Promise<AgentCallResult> {
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
       pendingAgentCalls.set(requestId, resolve);
-      send({ type: "agent.call", requestId, flowName, nodeId, input, config });
+      send({
+        type: "agent.call",
+        requestId,
+        flowName,
+        nodeId,
+        input,
+        config,
+        ...(agentKind === undefined ? {} : { agentKind }),
+        ...(deviceId === undefined ? {} : { deviceId }),
+      });
     });
   }
 

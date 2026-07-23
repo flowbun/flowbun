@@ -1,4 +1,4 @@
-import type { AgentConfig } from "../ai/agent";
+import type { AgentCallKind, AnyAgentConfig } from "../ai/agent";
 import type { ActionCall } from "../hass/action";
 import type { EntityStateReading, HassEntitySummary } from "../hass/client";
 import type { ExposedEntitySummary } from "../hass/exposed-entities";
@@ -73,7 +73,14 @@ export type FlowHostToCoordinator =
       requestId: number;
       nodeId: string;
       input: unknown;
-      config: AgentConfig;
+      config: AnyAgentConfig;
+      /** Which agent block this is — see AgentCallKind. Absent = "full". */
+      agentKind?: AgentCallKind;
+      /** Originating voice satellite's HA device id (from the input's
+       * `meta`, which is otherwise held back from the relay — see
+       * splitAgentInput) — the "hass" toolset's start_timer stamps it onto
+       * new timers so timer_watchdog announces through the right speaker. */
+      deviceId?: string;
     }
   | {
       type: "hass.entities.result";
@@ -134,7 +141,10 @@ export type CoordinatorToAiHost =
       flowName: string;
       nodeId: string;
       input: unknown;
-      config: AgentConfig;
+      config: AnyAgentConfig;
+      /** See FlowHostToCoordinator's own agent.call — forwarded verbatim. */
+      agentKind?: AgentCallKind;
+      deviceId?: string;
     }
   | { type: "agent.cancelForFlow"; flowName: string }
   | { type: "shutdown" };

@@ -14,6 +14,7 @@ import type {
   TypecheckOutcome,
 } from "flowbun/ws";
 import type { AiHostClient } from "./ai-host-client";
+import { extractBlockName } from "./block-source";
 import type { ChatEventBuffer } from "./chat-event-buffer";
 import type { FlowPackageManager } from "./flow-packages";
 import { ModifiedFilesError } from "./flow-packages";
@@ -62,6 +63,9 @@ export interface WsServerDeps {
   reloadBlocksAndRestartAll: (label?: string) => Promise<TypecheckOutcome>;
   createFlow: (name: string) => Promise<{ file: string; wiring: Wiring }>;
   createBlock: (name: string) => Promise<{ file: string; source: string }>;
+  duplicateBlock: (
+    blockName: string,
+  ) => Promise<{ file: string; name: string; source: string }>;
   deleteBlock: (file: string) => Promise<void>;
   deleteFlow: (file: string) => Promise<void>;
   listHassEntities: () => Promise<HassEntitySummary[]>;
@@ -280,6 +284,7 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 ok: true,
                 typecheck,
                 source: formatted,
+                name: extractBlockName(formatted),
                 undo: deps.undoStack.status(relPath),
               });
             } catch (err) {
@@ -306,6 +311,7 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 requestId: msg.requestId,
                 ok: true,
                 source,
+                name: extractBlockName(source),
                 undo: deps.undoStack.status(relPath),
               });
             } catch (err) {
@@ -350,12 +356,34 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 requestId: msg.requestId,
                 ok: true,
                 source: restoredText,
+                name: extractBlockName(restoredText),
                 typecheck,
                 undo: deps.undoStack.status(relPath),
               });
             } catch (err) {
               reply({
                 type: resultType,
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "block.duplicate": {
+            try {
+              const result = await deps.duplicateBlock(msg.blockName);
+              reply({
+                type: "block.duplicateResult",
+                requestId: msg.requestId,
+                ok: true,
+                file: result.file,
+                name: result.name,
+                source: result.source,
+              });
+            } catch (err) {
+              reply({
+                type: "block.duplicateResult",
                 requestId: msg.requestId,
                 ok: false,
                 error: String(err),

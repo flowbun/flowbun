@@ -3,6 +3,7 @@ import type { Logger, StateScope } from "../block";
 import { setHassCallTransport } from "../hass/action";
 import { setHassReadTransport } from "../hass/client";
 import { setExposedEntitiesTransport } from "../hass/exposed-entities";
+import { resetExposedEntitiesCache } from "./hass-tools";
 import type { OpenAiAgentConfig } from "./openai-agent";
 import { runOpenAiAgent } from "./openai-agent";
 import { listTimers, startTimer } from "./voice-timers";
@@ -33,6 +34,7 @@ afterEach(() => {
   setHassReadTransport(null);
   setHassCallTransport(null);
   setExposedEntitiesTransport(null);
+  resetExposedEntitiesCache();
 });
 
 function config(overrides: Partial<OpenAiAgentConfig> = {}): OpenAiAgentConfig {
@@ -47,6 +49,7 @@ function config(overrides: Partial<OpenAiAgentConfig> = {}): OpenAiAgentConfig {
     timeoutMs: 5000,
     enableHassTools: false,
     enableTimerTools: false,
+    extraBody: {},
     ...overrides,
   };
 }
@@ -109,6 +112,28 @@ describe("runOpenAiAgent", () => {
       durationMs: expect.any(Number),
       numTurns: 1,
     });
+  });
+
+  test("merges extraBody into the request body, overriding standard fields", async () => {
+    let seenBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      seenBody = JSON.parse(init.body as string);
+      return successMessage("ok");
+    }) as unknown as typeof fetch;
+
+    await runOpenAiAgent(
+      config({
+        extraBody: {
+          chat_template_kwargs: { enable_thinking: false },
+          temperature: 0.1,
+        },
+      }),
+      "hi",
+      noopLog,
+    );
+
+    expect(seenBody?.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(seenBody?.temperature).toBe(0.1);
   });
 
   test("includes a bearer Authorization header only when apiKey is set", async () => {
@@ -259,6 +284,17 @@ describe("runOpenAiAgent", () => {
         executed.push(call);
       },
     });
+    setExposedEntitiesTransport({
+      list: async () => [
+        {
+          entity: "light.kitchen",
+          domain: "light",
+          friendlyName: "Kitchen",
+          aliases: [],
+          areaId: null,
+        },
+      ],
+    });
     let turn = 0;
     globalThis.fetch = (async () => {
       turn++;
@@ -302,6 +338,71 @@ describe("runOpenAiAgent", () => {
         target: { entity_id: "light.kitchen" },
       },
     ]);
+  });
+
+  test("hass_call_service refuses an entity outside the exposed set, without touching the call transport", async () => {
+    const executed: unknown[] = [];
+    setHassCallTransport({
+      call: async (call) => {
+        executed.push(call);
+      },
+    });
+    // A definitively-fetched, non-empty exposure list that does NOT contain
+    // the target — the one case the exposure check is allowed to block on.
+    setExposedEntitiesTransport({
+      list: async () => [
+        {
+          entity: "light.kitchen",
+          domain: "light",
+          friendlyName: "Kitchen",
+          aliases: [],
+          areaId: null,
+        },
+      ],
+    });
+    let turn = 0;
+    let toolResultContent = "";
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      turn++;
+      if (turn === 1) {
+        return chatResponse({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_1",
+                    type: "function",
+                    function: {
+                      name: "hass_call_service",
+                      arguments: JSON.stringify({
+                        domain: "lock",
+                        service: "unlock",
+                        entity_id: "lock.front_door",
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }
+      const body = JSON.parse(init.body as string);
+      toolResultContent = body.messages.at(-1).content;
+      return successMessage("sorry, I can't do that");
+    }) as unknown as typeof fetch;
+
+    await runOpenAiAgent(
+      config({ enableHassTools: true }),
+      "unlock the front door",
+      noopLog,
+    );
+
+    expect(executed).toEqual([]);
+    expect(JSON.parse(toolResultContent)).toMatchObject({ ok: false });
+    expect(JSON.parse(toolResultContent).error).toContain("not exposed");
   });
 
   test("hass_list_entities tool relays through the exposed-entities transport", async () => {

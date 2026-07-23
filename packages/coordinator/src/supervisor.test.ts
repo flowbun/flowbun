@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentConfig } from "flowbun/ai/agent";
+import type { AgentConfig, AnyAgentConfig } from "flowbun/ai/agent";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { AgentCallResult, AiHostClient } from "./ai-host-client";
 import { LogBuffer } from "./log-buffer";
@@ -17,10 +17,10 @@ function fakeAgentConfig(): AgentConfig {
 }
 
 function fakeAiHostClient(callAgentResult: AgentCallResult): AiHostClient & {
-  calls: Array<[string, string, unknown, AgentConfig]>;
+  calls: Array<[string, string, unknown, AnyAgentConfig]>;
   cancelled: string[];
 } {
-  const calls: Array<[string, string, unknown, AgentConfig]> = [];
+  const calls: Array<[string, string, unknown, AnyAgentConfig]> = [];
   const cancelled: string[] = [];
   return {
     calls,

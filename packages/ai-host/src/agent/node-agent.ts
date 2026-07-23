@@ -1,6 +1,15 @@
-import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import type { Options, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentConfig } from "flowbun/ai/agent";
+import type { StateScope } from "flowbun";
+import { makeStateScope, openStateDb } from "flowbun";
+import type {
+  AgentCallKind,
+  AgentConfig,
+  AgentHassConfig,
+  AnyAgentConfig,
+} from "flowbun/ai/agent";
 import {
   DEFAULT_FULL_ACCESS_MAX_TURNS,
   DEFAULT_FULL_ACCESS_TIMEOUT_MS,
@@ -8,6 +17,10 @@ import {
   DEFAULT_TIMEOUT_MS,
 } from "flowbun/ai/agent";
 import { hasClaudeCredentials } from "./auth";
+import {
+  createHassAgentMcpServer,
+  type MutableHassHooks,
+} from "./hass-mcp-server";
 import { createAgentMcpServer, type ToolCaller } from "./mcp-server";
 
 export type AgentCallResult =
@@ -25,7 +38,9 @@ export interface AgentNodeCaller {
     flowName: string,
     nodeId: string,
     input: unknown,
-    config: AgentConfig,
+    config: AnyAgentConfig,
+    agentKind?: AgentCallKind,
+    deviceId?: string,
   ): Promise<AgentCallResult>;
   /** Aborts every in-flight call belonging to `flowName` — called when that
    * flow's flow-host is about to be killed for a restart/stop, so a call
@@ -39,6 +54,13 @@ export interface AgentNodeCallerOptions {
   /** Pinned cwd for every query() call — see runner.ts's own note on why
    * this must stay stable. */
   cwd: string;
+  /** The data directory — needed by the "hass" toolset's timer tools,
+   * which read/write the shared SQLite state DB (<dataDir>/state/
+   * flowbun.sqlite, WAL — the same file every flow-host and worker already
+   * opens concurrently) so timers land in the owning flow's state scope,
+   * where voice_gate and timer_watchdog look for them. Defaults to `cwd`,
+   * which main.ts pins to DATA_DIR anyway. */
+  dataDir?: string;
   /** How long the SDK's message stream may go COMPLETELY silent mid-call
    * before the call is declared stalled — the CLI subprocess is killed and
    * the request automatically retried once on a fresh session. Distinct
@@ -130,6 +152,11 @@ interface HotSession {
   dead: boolean;
   idleTimer: ReturnType<typeof setTimeout> | null;
   untrack: () => void;
+  /** The hass toolset's per-call context (see MutableHassHooks) — the
+   * session's MCP server closes over this ref once at creation, and each
+   * hotCall updates `current.deviceId` before pushing its prompt. Unused
+   * (but harmlessly present) for "full" sessions. */
+  hooks: MutableHassHooks;
 }
 
 /**
@@ -146,6 +173,41 @@ export function createAgentNodeCaller(
 ): AgentNodeCaller {
   const controllersByFlow = new Map<string, Set<AbortController>>();
   const hotSessions = new Map<string, HotSession>();
+
+  // One shared connection to the same WAL-mode SQLite file every flow-host
+  // already has open — opened lazily so an ai-host that never runs a hass
+  // agent never touches it.
+  let stateDb: ReturnType<typeof openStateDb> | null = null;
+  function flowStateScope(flowName: string): StateScope {
+    if (!stateDb) {
+      // openStateDb creates the file but not its directory — and on a
+      // fresh deployment this process can win the race against the first
+      // flow-host that would otherwise have created it.
+      const stateDir = join(opts.dataDir ?? opts.cwd, "state");
+      mkdirSync(stateDir, { recursive: true });
+      stateDb = openStateDb(join(stateDir, "flowbun.sqlite"));
+    }
+    return makeStateScope(stateDb, "flow", flowName);
+  }
+
+  /** fullAccess is an @ai/agent-only concept — a "hass" call never has it,
+   * whatever its config JSON might claim. */
+  function isFullAccess(config: AnyAgentConfig, kind: AgentCallKind): boolean {
+    return kind === "full" && (config as AgentConfig).fullAccess === true;
+  }
+
+  function makeHassHooks(
+    kind: AgentCallKind,
+    flowName: string,
+    deviceId: string | undefined,
+  ): MutableHassHooks {
+    return {
+      current: {
+        ...(kind === "hass" ? { flowState: flowStateScope(flowName) } : {}),
+        ...(deviceId === undefined ? {} : { deviceId }),
+      },
+    };
+  }
 
   function track(flowName: string, controller: AbortController): () => void {
     let set = controllersByFlow.get(flowName);
@@ -179,26 +241,54 @@ export function createAgentNodeCaller(
   }
 
   function buildQueryOptions(
-    config: AgentConfig,
+    config: AnyAgentConfig,
     maxTurns: number,
     abortController: AbortController,
-  ) {
+    kind: AgentCallKind,
+    hassHooks: MutableHassHooks,
+  ): Options {
+    if (kind === "hass") {
+      // @ai/agent-hass: only the hass/timer MCP toolset (in-process — see
+      // hass-mcp-server.ts), and the configured systemPrompt VERBATIM as
+      // the whole system prompt (no claude_code preset preamble) —
+      // deliberately mirroring what @ai/openai_agent sends its server.
+      const c = config as AgentHassConfig;
+      return {
+        cwd: opts.cwd,
+        model: c.model || undefined,
+        maxTurns,
+        abortController,
+        tools: [],
+        mcpServers: {
+          hass: createHassAgentMcpServer(
+            {
+              enableHassTools: c.enableHassTools === true,
+              enableTimerTools: c.enableTimerTools === true,
+            },
+            hassHooks,
+          ),
+        },
+        allowedTools: ["mcp__hass__*"],
+        systemPrompt: c.systemPrompt,
+      };
+    }
+    const full = config as AgentConfig;
     // MCP server fresh per query() — see mcp-server.ts's own comment on why
     // a shared instance would throw on the second concurrent connect.
     const mcpServer = createAgentMcpServer(callTool);
     return {
       cwd: opts.cwd,
-      model: config.model || undefined,
+      model: full.model || undefined,
       maxTurns,
       abortController,
       // Bounded mode still gets the flowbun MCP tools (same scope as
       // the interactive chat agent) — only fullAccess additionally
       // inherits the SDK's full built-in tool set (Bash/Read/Write/
       // Edit/WebFetch/WebSearch/...) by omitting `tools` entirely.
-      ...(config.fullAccess ? {} : { tools: [] }),
+      ...(full.fullAccess ? {} : { tools: [] }),
       mcpServers: { flowbun: mcpServer },
       allowedTools: ["mcp__flowbun__*"],
-      ...(config.fullAccess
+      ...(full.fullAccess
         ? {
             permissionMode: "bypassPermissions" as const,
             allowDangerouslySkipPermissions: true,
@@ -207,7 +297,7 @@ export function createAgentNodeCaller(
       systemPrompt: {
         type: "preset" as const,
         preset: "claude_code" as const,
-        append: config.systemPrompt,
+        append: full.systemPrompt,
       },
     };
   }
@@ -257,9 +347,11 @@ export function createAgentNodeCaller(
     flowName: string,
     nodeId: string,
     promptText: string,
-    config: AgentConfig,
+    config: AnyAgentConfig,
     timeoutMs: number,
     maxTurns: number,
+    kind: AgentCallKind,
+    deviceId: string | undefined,
   ): Promise<AgentCallResult> {
     const abortController = new AbortController();
     const untrack = track(flowName, abortController);
@@ -267,12 +359,18 @@ export function createAgentNodeCaller(
     try {
       const stream = queryFn({
         prompt: promptText,
-        options: buildQueryOptions(config, maxTurns, abortController),
+        options: buildQueryOptions(
+          config,
+          maxTurns,
+          abortController,
+          kind,
+          makeHassHooks(kind, flowName, deviceId),
+        ),
       });
 
       // fullAccess turns run long, legitimately silent tools (Bash,
       // WebFetch) — the stall watchdog only guards bounded calls.
-      const stallMs = config.fullAccess
+      const stallMs = isFullAccess(config, kind)
         ? 0
         : (opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS);
       const timeout = turnTimeout(nodeId, timeoutMs, abortController);
@@ -315,11 +413,13 @@ export function createAgentNodeCaller(
   function createHotSession(
     flowName: string,
     fingerprint: string,
-    config: AgentConfig,
+    config: AnyAgentConfig,
     maxTurns: number,
+    kind: AgentCallKind,
   ): HotSession {
     const abortController = new AbortController();
     const untrack = track(flowName, abortController);
+    const hooks = makeHassHooks(kind, flowName, undefined);
 
     const queue: string[] = [];
     let notify: (() => void) | null = null;
@@ -352,6 +452,8 @@ export function createAgentNodeCaller(
         // abort below.
         maxTurns * HOT_SESSION_MAX_USER_TURNS,
         abortController,
+        kind,
+        hooks,
       ),
     }) as AsyncGenerator<unknown, void>;
 
@@ -369,6 +471,7 @@ export function createAgentNodeCaller(
       dead: false,
       idleTimer: null,
       untrack,
+      hooks,
     };
   }
 
@@ -376,12 +479,14 @@ export function createAgentNodeCaller(
     flowName: string,
     nodeId: string,
     promptText: string,
-    config: AgentConfig,
+    config: AnyAgentConfig,
     timeoutMs: number,
     maxTurns: number,
+    kind: AgentCallKind,
+    deviceId: string | undefined,
   ): Promise<AgentCallResult> {
     const key = `${flowName}::${nodeId}`;
-    const fingerprint = JSON.stringify(config);
+    const fingerprint = JSON.stringify({ kind, config });
 
     let session = hotSessions.get(key);
     if (session?.busy) {
@@ -395,6 +500,8 @@ export function createAgentNodeCaller(
         config,
         timeoutMs,
         maxTurns,
+        kind,
+        deviceId,
       );
     }
     if (session && (session.dead || session.fingerprint !== fingerprint)) {
@@ -402,16 +509,19 @@ export function createAgentNodeCaller(
       session = undefined;
     }
     if (!session) {
-      session = createHotSession(flowName, fingerprint, config, maxTurns);
+      session = createHotSession(flowName, fingerprint, config, maxTurns, kind);
       hotSessions.set(key, session);
     }
 
     session.busy = true;
     if (session.idleTimer) clearTimeout(session.idleTimer);
+    // The session's MCP server reads hooks through this ref at invocation
+    // time — refresh the per-call satellite id before the prompt lands.
+    session.hooks.current.deviceId = deviceId;
     const timeout = turnTimeout(nodeId, timeoutMs, session.abortController);
     try {
       session.push(promptText);
-      const stallMs = config.fullAccess
+      const stallMs = isFullAccess(config, kind)
         ? 0
         : (opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS);
       const readUntilResult = (async (): Promise<AgentCallResult> => {
@@ -461,7 +571,9 @@ export function createAgentNodeCaller(
     flowName: string,
     nodeId: string,
     input: unknown,
-    config: AgentConfig,
+    config: AnyAgentConfig,
+    agentKind: AgentCallKind = "full",
+    deviceId?: string,
   ): Promise<AgentCallResult> {
     if (!hasClaudeCredentials(opts.claudeConfigDir)) {
       return {
@@ -471,17 +583,27 @@ export function createAgentNodeCaller(
       };
     }
 
+    const full = isFullAccess(config, agentKind);
     const timeoutMs =
       config.timeoutMs ||
-      (config.fullAccess ? DEFAULT_FULL_ACCESS_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
+      (full ? DEFAULT_FULL_ACCESS_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
     const maxTurns =
       config.maxTurns ||
-      (config.fullAccess ? DEFAULT_FULL_ACCESS_MAX_TURNS : DEFAULT_MAX_TURNS);
+      (full ? DEFAULT_FULL_ACCESS_MAX_TURNS : DEFAULT_MAX_TURNS);
     const promptText = promptFromInput(input);
 
     const attempt = () =>
       config.persistSession
-        ? hotCall(flowName, nodeId, promptText, config, timeoutMs, maxTurns)
+        ? hotCall(
+            flowName,
+            nodeId,
+            promptText,
+            config,
+            timeoutMs,
+            maxTurns,
+            agentKind,
+            deviceId,
+          )
         : oneShotCall(
             flowName,
             nodeId,
@@ -489,6 +611,8 @@ export function createAgentNodeCaller(
             config,
             timeoutMs,
             maxTurns,
+            agentKind,
+            deviceId,
           );
 
     const result = await attempt();

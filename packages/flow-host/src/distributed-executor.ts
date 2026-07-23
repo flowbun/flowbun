@@ -4,7 +4,7 @@ import type {
   NodeExecutionRequest,
   NodeExecutor,
 } from "flowbun";
-import type { AgentConfig } from "flowbun/ai/agent";
+import type { AgentCallKind, AnyAgentConfig } from "flowbun/ai/agent";
 import { splitAgentInput } from "flowbun/ai/agent";
 import type { CoordinatorToFlowHost, FlowHostToCoordinator } from "flowbun/ipc";
 import type { WorkerManager } from "./worker-manager";
@@ -84,8 +84,12 @@ export class DistributedExecutor implements NodeExecutor {
     if (!node) throw new Error(`no such node "${req.nodeId}"`);
 
     if (node.block.kind === "relay") {
-      const config = node.config as AgentConfig;
-      return this.callAgent(node.nodeId, config, req.inputs.prompt);
+      const config = node.config as AnyAgentConfig;
+      // Which relay flavor rides in the block name — the ai-host builds a
+      // restricted hass-only session for @ai/agent-hass (see AgentCallKind).
+      const agentKind: AgentCallKind =
+        node.block.name === "@ai/agent-hass" ? "hass" : "full";
+      return this.callAgent(node.nodeId, config, req.inputs.prompt, agentKind);
     }
 
     const requestId = this.deps.workerManager.allocRequestId();
@@ -104,8 +108,9 @@ export class DistributedExecutor implements NodeExecutor {
 
   private callAgent(
     nodeId: string,
-    config: AgentConfig,
+    config: AnyAgentConfig,
     input: unknown,
+    agentKind: AgentCallKind,
   ): Promise<Record<string, unknown>> {
     // `meta` is correlation state for the wires AROUND this node (e.g.
     // @http/in's requestId riding through to the reply), not part of the
@@ -113,6 +118,15 @@ export class DistributedExecutor implements NodeExecutor {
     // model never sees it and the ai-host never has to know it exists. See
     // splitAgentInput's own doc comment for the exact input convention.
     const { forwarded, meta } = splitAgentInput(input);
+    // The one meta field the relay DOES forward: the originating satellite's
+    // device id, which the hass toolset's start_timer needs (mirrors how
+    // @ai/openai_agent reads it out of the same meta in-process).
+    const deviceId =
+      typeof meta === "object" &&
+      meta !== null &&
+      typeof (meta as { deviceId?: unknown }).deviceId === "string"
+        ? (meta as { deviceId: string }).deviceId
+        : undefined;
     const requestId = this.nextAgentRequestId++;
     this.deps.send({
       type: "agent.call",
@@ -120,6 +134,8 @@ export class DistributedExecutor implements NodeExecutor {
       nodeId,
       input: forwarded,
       config,
+      agentKind,
+      ...(deviceId === undefined ? {} : { deviceId }),
     });
     const marginMs =
       this.deps.agentCallTimeoutMarginMs ?? AGENT_CALL_TIMEOUT_MARGIN_MS;

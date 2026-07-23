@@ -1,11 +1,8 @@
-import type { Logger, StateScope } from "../block";
-import type { ActionCall } from "../hass/action";
-import { performHassAction } from "../hass/action";
-import { isDryRun, readEntityState } from "../hass/client";
-import { listExposedEntities } from "../hass/exposed-entities";
+import type { Logger } from "../block";
 import type { AgentOutputs } from "./agent";
 import { splitAgentInput } from "./agent";
-import { cancelTimer, startTimer, timerStatus } from "./voice-timers";
+import type { HassAgentHooks } from "./hass-tools";
+import { executeHassAgentTool } from "./hass-tools";
 
 /**
  * @ai/openai_agent's config — a deliberate drop-in for @ai/agent's own
@@ -85,16 +82,22 @@ export interface OpenAiAgentConfig {
    * against a server you wouldn't yet trust with hass_call_service.
    */
   enableTimerTools: boolean;
+  /**
+   * Extra properties merged verbatim into every /chat/completions request
+   * body, after the standard fields (so a key here overrides them; `tools`
+   * is the one exception — the tool-calling loop owns it). The escape
+   * hatch for server-specific knobs this config doesn't model — e.g.
+   * llama.cpp's `{"chat_template_kwargs": {"enable_thinking": false}}` to
+   * stop a thinking-by-default model (Qwen3+) from spending its whole
+   * token budget on reasoning, or `top_p`/`min_p` sampling overrides.
+   */
+  extraBody: Record<string, unknown>;
 }
 
-/** Per-call context the block's process() threads through — the tool
- * executor needs this flow's own state scope (timers live there) and the
- * originating satellite's device id (stamped onto each timer so the
- * watchdog announces through the speaker that set it). */
-export interface OpenAiAgentHooks {
-  flowState?: StateScope;
-  deviceId?: string;
-}
+/** Per-call context the block's process() threads through — see
+ * HassAgentHooks (hass-tools.ts), where the shared tool executor and its
+ * documentation now live. */
+export type OpenAiAgentHooks = HassAgentHooks;
 
 export const DEFAULT_MAX_TURNS = 4;
 export const DEFAULT_MAX_TOKENS = 512;
@@ -234,146 +237,6 @@ const TIMER_TOOLS = [
   },
 ] as const;
 
-function asOptionalNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value
-    : undefined;
-}
-
-function asOptionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
-
-async function callTimerTool(
-  name: string,
-  args: Record<string, unknown>,
-  hooks: OpenAiAgentHooks,
-): Promise<string> {
-  const state = hooks.flowState;
-  if (!state) {
-    return JSON.stringify({
-      error:
-        "timer tools need flow state, which this block wasn't given — this is a wiring/config bug, tell the user timers are unavailable",
-    });
-  }
-  switch (name) {
-    case "start_timer": {
-      const result = await startTimer(state, {
-        hours: asOptionalNumber(args.hours),
-        minutes: asOptionalNumber(args.minutes),
-        seconds: asOptionalNumber(args.seconds),
-        name: asOptionalString(args.name),
-        deviceId: hooks.deviceId,
-      });
-      return JSON.stringify(result);
-    }
-    case "cancel_timer": {
-      const result = await cancelTimer(state, {
-        id: asOptionalNumber(args.id),
-        name: asOptionalString(args.name),
-      });
-      return JSON.stringify(result);
-    }
-    case "timer_status": {
-      const result = await timerStatus(state, {
-        id: asOptionalNumber(args.id),
-        name: asOptionalString(args.name),
-      });
-      return JSON.stringify(result);
-    }
-    default:
-      return JSON.stringify({ error: `unknown timer tool "${name}"` });
-  }
-}
-
-const TIMER_TOOL_NAMES = new Set([
-  "start_timer",
-  "cancel_timer",
-  "timer_status",
-]);
-
-/** One dispatch for every tool call the loop encounters: parse the
- * arguments once, then route by name — timer tools first (guarded by their
- * own flag), everything else to the HA executor. A tool the model invents,
- * or one whose feature flag is off, resolves as a tool-level error message
- * the model can recover from, never a thrown exception. */
-async function executeTool(
-  name: string,
-  argsJson: string,
-  config: OpenAiAgentConfig,
-  hooks: OpenAiAgentHooks,
-): Promise<string> {
-  let args: Record<string, unknown>;
-  try {
-    args = argsJson ? JSON.parse(argsJson) : {};
-  } catch {
-    return JSON.stringify({ error: "tool arguments were not valid JSON" });
-  }
-  if (TIMER_TOOL_NAMES.has(name)) {
-    if (!config.enableTimerTools) {
-      return JSON.stringify({ error: `unknown tool "${name}"` });
-    }
-    return callTimerTool(name, args, hooks);
-  }
-  if (!config.enableHassTools) {
-    return JSON.stringify({ error: `unknown tool "${name}"` });
-  }
-  return callHassTool(name, args);
-}
-
-async function callHassTool(
-  name: string,
-  args: Record<string, unknown>,
-): Promise<string> {
-  switch (name) {
-    case "hass_get_state": {
-      const entity = args.entity;
-      if (typeof entity !== "string" || !entity) {
-        return JSON.stringify({ error: 'missing required "entity"' });
-      }
-      const reading = await readEntityState(entity);
-      return reading
-        ? JSON.stringify(reading)
-        : JSON.stringify({ error: `unknown entity "${entity}"` });
-    }
-    case "hass_call_service": {
-      const domain = args.domain;
-      const service = args.service;
-      if (
-        typeof domain !== "string" ||
-        typeof service !== "string" ||
-        !domain ||
-        !service
-      ) {
-        return JSON.stringify({ error: 'missing required "domain"/"service"' });
-      }
-      const call: ActionCall = {
-        domain,
-        service,
-        ...(typeof args.entity_id === "string"
-          ? { target: { entity_id: args.entity_id } }
-          : {}),
-        ...(args.data && typeof args.data === "object"
-          ? { data: args.data as Record<string, unknown> }
-          : {}),
-      };
-      const dryRun = isDryRun();
-      try {
-        await performHassAction(call, dryRun);
-        return JSON.stringify({ ok: true, dryRun });
-      } catch (err) {
-        return JSON.stringify({ ok: false, error: String(err) });
-      }
-    }
-    case "hass_list_entities": {
-      const entities = await listExposedEntities("conversation");
-      return JSON.stringify(entities);
-    }
-    default:
-      return JSON.stringify({ error: `unknown tool "${name}"` });
-  }
-}
-
 /**
  * The real work: a small, self-contained OpenAI chat-completions client
  * with an optional tool-calling loop — no dependency on the coordinator or
@@ -448,6 +311,7 @@ export async function runOpenAiAgent(
         messages,
         max_tokens: config.maxTokens || DEFAULT_MAX_TOKENS,
         temperature: config.temperature ?? DEFAULT_TEMPERATURE,
+        ...config.extraBody,
       };
       if (tools.length > 0) body.tools = tools;
 
@@ -491,7 +355,7 @@ export async function runOpenAiAgent(
         tool_calls: toolCalls,
       });
       for (const call of toolCalls) {
-        const result = await executeTool(
+        const result = await executeHassAgentTool(
           call.function.name,
           call.function.arguments,
           config,

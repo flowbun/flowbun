@@ -234,7 +234,14 @@ export class Supervisor {
       }
       case "agent.call":
         this.aiHostClient
-          .callAgent(rt.flowName, msg.nodeId, msg.input, msg.config)
+          .callAgent(
+            rt.flowName,
+            msg.nodeId,
+            msg.input,
+            msg.config,
+            msg.agentKind,
+            msg.deviceId,
+          )
           .then((result) => {
             // The owning flow-host can have already exited (crash,
             // deliberate restart/stop) by the time this agent call

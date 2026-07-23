@@ -59,6 +59,7 @@ async function main(): Promise<void> {
     {
       claudeConfigDir,
       cwd: DATA_DIR,
+      dataDir: DATA_DIR,
       stallTimeoutMs: Bun.env.FLOWBUN_AGENT_STALL_TIMEOUT_MS
         ? Number(Bun.env.FLOWBUN_AGENT_STALL_TIMEOUT_MS)
         : undefined,
@@ -136,7 +137,14 @@ async function main(): Promise<void> {
       }
       case "agent.call": {
         agentNodeCaller
-          .call(msg.flowName, msg.nodeId, msg.input, msg.config)
+          .call(
+            msg.flowName,
+            msg.nodeId,
+            msg.input,
+            msg.config,
+            msg.agentKind,
+            msg.deviceId,
+          )
           .then((result) => {
             send({ type: "agent.result", requestId: msg.requestId, ...result });
           });

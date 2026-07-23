@@ -19,6 +19,7 @@ import type {
 } from "flowbun/ws";
 import type { AgentToolDeps } from "./agent/tools";
 import { createAiHostClient } from "./ai-host-client";
+import { renameBlockDefName } from "./block-source";
 import { ChatEventBuffer } from "./chat-event-buffer";
 import { runReplQuery } from "./db-repl";
 import { createFlowPackageManager } from "./flow-packages";
@@ -857,6 +858,71 @@ async function main(): Promise<void> {
   }
 
   /**
+   * Copies any block currently in the registry -- built-in (packages/
+   * runtime/src/blocks/*.ts, lost on every container rebuild) or add-on
+   * alike -- into a new, independently editable file under data/blocks/.
+   * This is the one place a block's *source* is read from somewhere other
+   * than data/blocks: entry.modulePath points at the stdlib directory for a
+   * `origin: "builtin"` entry (see discoverBlocks), which is otherwise
+   * invisible to the block.read/write ws handlers (they only ever join
+   * against DATA_DIR/blocks).
+   *
+   * The copy can't keep the original's internal name -- reusing e.g.
+   * "@core/scheduler" would make discoverBlocks skip this new file as a
+   * reserved-namespace collision (or, for a duplicated add-on block, a
+   * plain duplicate-name collision) -- so it gets the next free
+   * "<name> <n>" suffix, matching the generic-name convention the editor's
+   * duplicate button advertises. The user renames it to something real via
+   * the block editor's name field once they've opened it.
+   */
+  async function duplicateBlock(
+    blockName: string,
+  ): Promise<{ file: string; name: string; source: string }> {
+    const entry = registry.get(blockName);
+    if (!entry) {
+      throw new Error(`unknown block "${blockName}"`);
+    }
+    const source = await Bun.file(entry.modulePath).text();
+
+    let newName = `${blockName} 2`;
+    for (let n = 3; registry.has(newName); n++) {
+      newName = `${blockName} ${n}`;
+    }
+
+    const slug = slugifyName(newName);
+    if (!slug) {
+      throw new Error(`"${newName}" has no usable characters for a block name`);
+    }
+    let file = `${slug}.ts`;
+    let path = join(DATA_DIR, "blocks", file);
+    for (let n = 2; await Bun.file(path).exists(); n++) {
+      file = `${slug}_${n}.ts`;
+      path = join(DATA_DIR, "blocks", file);
+    }
+
+    const renamed = renameBlockDefName(source, blockName, newName);
+    const repoRoot = join(DATA_DIR, "..");
+    const formatted = await formatWithBiome(
+      renamed,
+      relative(repoRoot, path),
+      repoRoot,
+    );
+    recentSelfWrites.set(path, Date.now());
+    await Bun.write(path, formatted);
+    const check = await reloadBlocksAndRestartAll(
+      `duplicate block: ${blockName} -> ${file}`,
+    );
+    if (!check.ok) {
+      throw new Error(`duplicated block failed typecheck:\n${check.output}`);
+    }
+    await undoStack.recordEdit(join("blocks", file));
+    console.log(
+      `[coordinator] duplicated block "${blockName}" as "${newName}" (${file})`,
+    );
+    return { file, name: newName, source: formatted };
+  }
+
+  /**
    * Deliberately NOT wrapped in serializeReload itself — handleWiringFileDeleted
    * (defined below) already serializes internally, and double-wrapping would
    * self-deadlock, same reasoning as deleteBlock above. Reusing it here
@@ -942,6 +1008,7 @@ async function main(): Promise<void> {
     chatEvents,
     gitSnapshotter,
     restoreFlow,
+    duplicateBlock,
     getSystemStats: () =>
       collectSystemStats(flows, registry.size, logBuffer.all().length),
     queryDb: async (sql: string) => runReplQuery(replDb, sql),

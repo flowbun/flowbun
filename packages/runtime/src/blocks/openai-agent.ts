@@ -38,6 +38,7 @@ export default defineBlock<
     timeoutMs: DEFAULT_TIMEOUT_MS,
     enableHassTools: false,
     enableTimerTools: false,
+    extraBody: {},
   },
   inputs: { prompt: {} as unknown },
   outputs: { result: {} as AgentOutputs["result"] },

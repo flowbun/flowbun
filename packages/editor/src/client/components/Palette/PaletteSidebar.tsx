@@ -14,6 +14,7 @@ export function PaletteSidebar({
   palette,
   onOpenBlockEditor,
   onDeleteBlock,
+  onDuplicateBlock,
   onAddBlock,
   onCloseMobile,
   onNewBlock,
@@ -21,6 +22,10 @@ export function PaletteSidebar({
   palette: BlockPaletteEntry[];
   onOpenBlockEditor: (file: string) => void;
   onDeleteBlock: (file: string, name: string) => void;
+  /** Copies any block — built-in or add-on — into a new, editable add-on
+   * file. Keyed by the block's internal name since built-ins have no
+   * `file`. */
+  onDuplicateBlock: (blockName: string) => void;
   /** Provided on mobile only — native HTML5 drag doesn't fire from touch. */
   onAddBlock?: (blockName: string) => void;
   /** Provided on mobile only — renders a close button for the drawer. */
@@ -106,6 +111,15 @@ export function PaletteSidebar({
             ✎
           </button>
         )}
+        <button
+          type="button"
+          className="palette-entry-duplicate"
+          onClick={() => onDuplicateBlock(entry.name)}
+          title="Duplicate as an editable add-on block"
+          aria-label={`Duplicate ${entry.name}`}
+        >
+          ⧉
+        </button>
         {file && (
           <button
             type="button"

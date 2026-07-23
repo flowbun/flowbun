@@ -144,6 +144,55 @@ describe("createAgentNodeCaller", () => {
     expect(calls[0]?.options?.allowedTools).toEqual(["mcp__flowbun__*"]);
   });
 
+  test('agentKind "hass" swaps in the hass MCP server, a verbatim systemPrompt, and no flowbun tools', async () => {
+    const calls: Array<{
+      options?: {
+        tools?: unknown;
+        mcpServers?: Record<string, unknown>;
+        allowedTools?: string[];
+        systemPrompt?: unknown;
+        permissionMode?: string;
+      };
+    }> = [];
+    const fakeQuery = ((params: (typeof calls)[number]) => {
+      calls.push(params);
+      async function* gen() {
+        yield resultSuccess("done");
+      }
+      return gen();
+    }) as unknown as typeof query;
+
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir },
+      noopCallTool,
+      fakeQuery,
+    );
+    const result = await caller.call(
+      "flow1",
+      "n1",
+      "hi",
+      {
+        systemPrompt: "you are a voice assistant",
+        model: "",
+        maxTurns: 4,
+        timeoutMs: 30,
+        persistSession: false,
+        enableHassTools: true,
+        enableTimerTools: true,
+      },
+      "hass",
+      "device-abc",
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls[0]?.options?.tools).toEqual([]);
+    expect(Object.keys(calls[0]?.options?.mcpServers ?? {})).toEqual(["hass"]);
+    expect(calls[0]?.options?.allowedTools).toEqual(["mcp__hass__*"]);
+    // The whole system prompt, verbatim — no claude_code preset wrapper.
+    expect(calls[0]?.options?.systemPrompt).toBe("you are a voice assistant");
+    expect(calls[0]?.options?.permissionMode).toBeUndefined();
+  });
+
   test("fullAccess mode omits `tools` (inherits built-ins) and sets bypassPermissions", async () => {
     const calls: Array<{
       options?: {

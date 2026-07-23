@@ -55,6 +55,14 @@ export function MonacoBlockEditor({
     invert: true,
   });
   const [source, setSource] = useState<string | null>(null);
+  // The block's own `name:` field, as last confirmed on disk (`name`) vs.
+  // what the user is currently typing into the header input (`nameDraft`)
+  // — kept separate from `source` since Monaco only holds the raw text and
+  // has no notion of "the name field" on its own. A pending rename is
+  // folded into the source text right before it's sent (see save() below),
+  // not on every keystroke, so it can't stomp on unrelated edits mid-typing.
+  const [name, setName] = useState<string | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
   const [typecheck, setTypecheck] = useState<TypecheckOutcome | null>(null);
   const [saving, setSaving] = useState(false);
   const [undo, setUndo] = useState<UndoStatus>({
@@ -75,6 +83,8 @@ export function MonacoBlockEditor({
       if (r.type === "block.readResult" && r.ok) {
         setSource(r.source);
         setUndo(r.undo);
+        setName(r.name ?? null);
+        setNameDraft(r.name ?? "");
       }
     },
     [file, send],
@@ -88,6 +98,26 @@ export function MonacoBlockEditor({
     };
   }, [loadSource]);
 
+  // Applies a pending header-input rename to the raw source text right
+  // before it's sent — the source of truth for "the name" is always the
+  // `name:` field in the text, this just keeps the header input from
+  // requiring its own separate save action. Falls back to the untouched
+  // source (rather than silently dropping the rename) if the current
+  // `name:` field can't be found, e.g. it was hand-edited into something
+  // this regex doesn't recognize — the typecheck error surfaced from that
+  // is easier to diagnose than a rename that quietly didn't take.
+  function applyPendingRename(src: string): string {
+    if (!name || nameDraft === name) return src;
+    const escapedOld = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(^\\s*name:\\s*)"${escapedOld}"`, "m");
+    if (!pattern.test(src)) return src;
+    const escapedNew = JSON.stringify(nameDraft).slice(1, -1);
+    return src.replace(
+      pattern,
+      (_match, prefix: string) => `${prefix}"${escapedNew}"`,
+    );
+  }
+
   async function save(nextSource: string) {
     setSaving(true);
     try {
@@ -95,7 +125,7 @@ export function MonacoBlockEditor({
         type: "block.write",
         requestId: generateRequestId(),
         file,
-        source: nextSource,
+        source: applyPendingRename(nextSource),
       });
       if (r.type === "block.writeResult") {
         setTypecheck(r.ok ? r.typecheck : { ok: false, output: r.error });
@@ -105,6 +135,8 @@ export function MonacoBlockEditor({
         if (r.ok) {
           setSource(r.source);
           setUndo(r.undo);
+          setName(r.name ?? null);
+          setNameDraft(r.name ?? "");
         }
       }
     } finally {
@@ -119,6 +151,8 @@ export function MonacoBlockEditor({
         setSource(r.source);
         setTypecheck(r.typecheck);
         setUndo(r.undo);
+        setName(r.name ?? null);
+        setNameDraft(r.name ?? "");
       }
     }
   }
@@ -170,7 +204,19 @@ export function MonacoBlockEditor({
           />
         )}
         <div className="block-editor-header">
-          <strong>{file}</strong>
+          <div className="block-editor-title">
+            <input
+              type="text"
+              className="block-editor-name-input"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              disabled={name === null}
+              placeholder={name === null ? "(name not found)" : undefined}
+              title="Block name — referenced by nodes that use this block. Renaming and saving updates the name in the source below."
+              aria-label="Block name"
+            />
+            <span className="block-editor-file">{file}</span>
+          </div>
           <div className="block-editor-actions">
             <button
               type="button"

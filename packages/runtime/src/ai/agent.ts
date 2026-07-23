@@ -24,6 +24,39 @@ export const DEFAULT_FULL_ACCESS_TIMEOUT_MS = 300_000;
 export const DEFAULT_MAX_TURNS = 6;
 export const DEFAULT_FULL_ACCESS_MAX_TURNS = 25;
 
+/**
+ * @ai/agent-hass's config (see blocks/agent-hass.ts) — @ai/agent narrowed
+ * to the same capability surface as @ai/openai_agent: no fullAccess, no
+ * flowbun flow/block-editing tools, just the exposure-respecting HA tools
+ * and kitchen-timer tools behind the same two flags @ai/openai_agent uses
+ * (executed by the exact same shared code — see hass-tools.ts). The model
+ * also gets `systemPrompt` VERBATIM as its whole system prompt — no Claude
+ * Code preset preamble — matching how @ai/openai_agent prompts its server.
+ * Field-for-field, this is OpenAiAgentConfig minus the wire-format fields
+ * (baseUrl/apiKey/maxTokens/temperature/extraBody) plus @ai/agent's
+ * model/persistSession, so a node can swap between the three agent blocks
+ * by editing only those.
+ */
+export interface AgentHassConfig {
+  systemPrompt: string;
+  /** "" means "no override" — SDK default model. */
+  model: string;
+  maxTurns: number;
+  timeoutMs: number;
+  /** Same warm-session trade as AgentConfig.persistSession above. */
+  persistSession: boolean;
+  enableHassTools: boolean;
+  enableTimerTools: boolean;
+}
+
+/** Which tool surface an agent.call relay wants — "full" is @ai/agent
+ * (flowbun MCP toolset, claude_code preset prompt), "hass" is
+ * @ai/agent-hass (see AgentHassConfig above). Rides the agent.call IPC
+ * messages so the ai-host builds the right session; absent means "full"
+ * for compatibility. */
+export type AgentCallKind = "full" | "hass";
+export type AnyAgentConfig = AgentConfig | AgentHassConfig;
+
 export interface AgentOutputs {
   result: {
     text: string;
