@@ -30,6 +30,74 @@ describe("nextDailyTime", () => {
   });
 });
 
+describe("nextDailyTime with weekdays", () => {
+  // 2026-06-15 is a Monday (getDay() === 1); asserted in the first test so
+  // every hardcoded weekday expectation below is anchored to a checked fact.
+  const MONDAY = new Date(2026, 5, 15, 6, 0, 0);
+
+  test("fires today when today's weekday is allowed and the time hasn't passed", () => {
+    expect(MONDAY.getDay()).toBe(1);
+    const next = nextDailyTime("22:30", MONDAY, [1]);
+    expect(next.getDate()).toBe(15);
+    expect(next.getHours()).toBe(22);
+    expect(next.getMinutes()).toBe(30);
+  });
+
+  test("skips to the next allowed weekday when today is not allowed", () => {
+    // Tuesday only, asked on a Monday -> Tuesday the 16th.
+    const next = nextDailyTime("15:00", MONDAY, [2]);
+    expect(next.getDate()).toBe(16);
+    expect(next.getDay()).toBe(2);
+    expect(next.getHours()).toBe(15);
+    expect(next.getMinutes()).toBe(0);
+  });
+
+  test("wraps a full week when today is the only allowed day but the time has passed", () => {
+    const lateMonday = new Date(2026, 5, 15, 23, 0, 0);
+    const next = nextDailyTime("22:30", lateMonday, [1]);
+    expect(next.getDate()).toBe(22);
+    expect(next.getDay()).toBe(1);
+    expect(next.getHours()).toBe(22);
+  });
+
+  test("picks the nearest of multiple allowed weekdays", () => {
+    // Sunday and Thursday allowed, asked on a Monday -> Thursday the 18th
+    // comes before next Sunday the 21st.
+    const next = nextDailyTime("15:00", MONDAY, [0, 4]);
+    expect(next.getDate()).toBe(18);
+    expect(next.getDay()).toBe(4);
+  });
+
+  test("falls to a later allowed day this week once today's time has passed", () => {
+    const lateMonday = new Date(2026, 5, 15, 23, 0, 0);
+    const next = nextDailyTime("22:30", lateMonday, [1, 3]);
+    expect(next.getDate()).toBe(17);
+    expect(next.getDay()).toBe(3);
+  });
+
+  test("throws on an empty weekdays list", () => {
+    expect(() => nextDailyTime("15:00", MONDAY, [])).toThrow(/empty/);
+  });
+
+  test("throws on out-of-range or non-integer weekday values", () => {
+    expect(() => nextDailyTime("15:00", MONDAY, [7])).toThrow(
+      /invalid weekday/,
+    );
+    expect(() => nextDailyTime("15:00", MONDAY, [-1])).toThrow(
+      /invalid weekday/,
+    );
+    expect(() => nextDailyTime("15:00", MONDAY, [1.5])).toThrow(
+      /invalid weekday/,
+    );
+  });
+
+  test("omitted weekdays behaves exactly like every day", () => {
+    const restricted = nextDailyTime("22:30", MONDAY, [0, 1, 2, 3, 4, 5, 6]);
+    const unrestricted = nextDailyTime("22:30", MONDAY);
+    expect(restricted.getTime()).toBe(unrestricted.getTime());
+  });
+});
+
 describe("nextSunRelative", () => {
   // London, mid-summer: sunrise well before 06:00 local.
   const LAT = 51.5416;
@@ -65,6 +133,26 @@ describe("nextFireTime", () => {
 
   test("dailyTime mode requires time", () => {
     expect(() => nextFireTime({ mode: "dailyTime" }, new Date())).toThrow();
+  });
+
+  test("dailyTime mode forwards weekdays to nextDailyTime", () => {
+    // Monday the 15th, Tuesday-only schedule -> Tuesday the 16th.
+    const now = new Date(2026, 5, 15, 6, 0, 0);
+    const next = nextFireTime(
+      { mode: "dailyTime", time: "15:00", weekdays: [2] },
+      now,
+    );
+    expect(next.getDate()).toBe(16);
+    expect(next.getDay()).toBe(2);
+  });
+
+  test("dailyTime mode surfaces weekday validation errors", () => {
+    expect(() =>
+      nextFireTime(
+        { mode: "dailyTime", time: "15:00", weekdays: [] },
+        new Date(),
+      ),
+    ).toThrow();
   });
 
   test("sunRelative mode requires event/lat/lon", () => {

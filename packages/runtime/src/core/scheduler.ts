@@ -6,6 +6,8 @@ export interface SchedulerConfig {
   intervalMs?: number;
   /** mode: "dailyTime", 24h local time "HH:MM" */
   time?: string;
+  /** mode: "dailyTime", local days-of-week the schedule may fire on (0=Sunday..6=Saturday, matching Date.getDay()); omitted means every day */
+  weekdays?: number[];
   /** mode: "sunRelative" */
   event?: "sunrise" | "sunset";
   /** mode: "sunRelative", minutes added to the event time (may be negative) */
@@ -20,16 +22,55 @@ export interface SchedulerOutputs {
   fired: { at: number };
 }
 
-/** Next instant `HH:MM` (24h, local time) occurs at or after `now` — today if it hasn't passed yet, else tomorrow. */
-export function nextDailyTime(time: string, now: Date): Date {
+/**
+ * Next instant `HH:MM` (24h, local time) occurs at or after `now`, optionally
+ * restricted to `weekdays` (0=Sunday..6=Saturday, matching Date.getDay(),
+ * evaluated in local time like the rest of this function) — today if it
+ * hasn't passed yet and today's day is allowed, else the soonest allowed
+ * later day. Validated eagerly and loudly: a typo like `weekdays: [8]` (or an
+ * empty list, which could never fire) should fail at schedule time, not
+ * silently produce a timer that never goes off.
+ */
+export function nextDailyTime(
+  time: string,
+  now: Date,
+  weekdays?: number[],
+): Date {
   const match = /^(\d{1,2}):(\d{2})$/.exec(time);
   if (!match) throw new Error(`invalid dailyTime "${time}", expected "HH:MM"`);
   const hours = Number(match[1]);
   const minutes = Number(match[2]);
+
+  let allowed: Set<number> | undefined;
+  if (weekdays !== undefined) {
+    if (weekdays.length === 0) {
+      throw new Error(
+        'invalid weekdays: empty list would never fire — omit "weekdays" to fire every day',
+      );
+    }
+    for (const day of weekdays) {
+      if (!Number.isInteger(day) || day < 0 || day > 6) {
+        throw new Error(
+          `invalid weekday ${day}, expected an integer 0 (Sunday) through 6 (Saturday)`,
+        );
+      }
+    }
+    allowed = new Set(weekdays);
+  }
+
   const next = new Date(now);
   next.setHours(hours, minutes, 0, 0);
   if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
-  return next;
+  if (!allowed) return next;
+
+  // A non-empty allowed set repeats within 7 days, so at most 6 more
+  // day-advances are needed; setDate keeps wall-clock HH:MM across DST the
+  // same way the tomorrow-rollover above does.
+  for (let i = 0; i < 7; i++) {
+    if (allowed.has(next.getDay())) return next;
+    next.setDate(next.getDate() + 1);
+  }
+  throw new Error("unreachable: non-empty weekdays must match within 7 days");
 }
 
 /**
@@ -81,7 +122,7 @@ export function nextFireTime(config: SchedulerConfig, now: Date): Date {
   switch (config.mode) {
     case "dailyTime":
       if (!config.time) throw new Error('dailyTime mode requires "time"');
-      return nextDailyTime(config.time, now);
+      return nextDailyTime(config.time, now, config.weekdays);
     case "sunRelative":
       if (!config.event) throw new Error('sunRelative mode requires "event"');
       if (config.latitude === undefined || config.longitude === undefined) {

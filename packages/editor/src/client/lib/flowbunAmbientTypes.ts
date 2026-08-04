@@ -176,6 +176,8 @@ declare module "flowbun/core/scheduler" {
     intervalMs?: number;
     /** mode: "dailyTime", 24h local time "HH:MM" */
     time?: string;
+    /** mode: "dailyTime", local days-of-week the schedule may fire on (0=Sunday..6=Saturday, matching Date.getDay()); omitted means every day */
+    weekdays?: number[];
     /** mode: "sunRelative" */
     event?: "sunrise" | "sunset";
     /** mode: "sunRelative", minutes added to the event time (may be negative) */
@@ -190,7 +192,11 @@ declare module "flowbun/core/scheduler" {
     fired: { at: number };
   }
 
-  export function nextDailyTime(time: string, now: Date): Date;
+  export function nextDailyTime(
+    time: string,
+    now: Date,
+    weekdays?: number[],
+  ): Date;
   export function nextSunRelative(
     event: "sunrise" | "sunset",
     offsetMinutes: number,
