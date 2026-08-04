@@ -57,6 +57,19 @@ export interface AgentHassConfig {
 export type AgentCallKind = "full" | "hass";
 export type AnyAgentConfig = AgentConfig | AgentHassConfig;
 
+/**
+ * @ai/agent-hass's outputs: AgentOutputs plus `delta` — pieces of the
+ * answer text streamed WHILE the model is still generating, each stamped
+ * with the same `meta` echo the final result carries (so a downstream
+ * block can correlate chunks to e.g. an @http/in requestId). The final
+ * `result` still fires with the complete text after the last delta;
+ * deltas are additive, never a replacement. A flow that doesn't wire
+ * `delta` behaves exactly as before.
+ */
+export type AgentHassOutputs = AgentOutputs & {
+  delta: { text: string; meta?: unknown };
+};
+
 export interface AgentOutputs {
   result: {
     text: string;

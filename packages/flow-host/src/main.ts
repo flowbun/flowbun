@@ -80,6 +80,10 @@ async function main(): Promise<void> {
     workerManager,
     send,
     log: logger,
+    // Same deliberate cycle-break as setRouter() below: `router` is
+    // assigned before any agent call (and hence any delta) can exist.
+    emitDelta: (nodeId, payload) =>
+      router.emitFromSource(nodeId, "delta", payload),
   });
   const router = new Router(flow, logger, executor);
   workerManager.setRouter(router);
@@ -88,6 +92,8 @@ async function main(): Promise<void> {
     const msg = raw as CoordinatorToFlowHost;
     if (msg.type === "agent.result") {
       (executor as DistributedExecutor).handleAgentResult(msg);
+    } else if (msg.type === "agent.delta") {
+      (executor as DistributedExecutor).handleAgentDelta(msg);
     } else if (msg.type === "hass.entities.query") {
       // Lazily bootstraps this flow-host's own HA connection if it hasn't
       // already opened one — see hass/client.ts's getHass(). Purely a

@@ -45,7 +45,7 @@ const DATA_DIR =
 const WS_PORT = Number(Bun.env.FLOWBUN_WS_PORT ?? 8787);
 const FLOWBUN_REGISTRY_URL =
   Bun.env.FLOWBUN_REGISTRY_URL ??
-  "https://raw.githubusercontent.com/aquarat/flowbun-registry/main";
+  "https://raw.githubusercontent.com/flowbun/flowbun-registry/main";
 // A full reload (typecheck + restart) routinely takes longer than a
 // single-digit hundred ms, so a burst of edits within that window can
 // trigger several overlapping reloads for the same file. 2s comfortably

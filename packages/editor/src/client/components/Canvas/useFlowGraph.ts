@@ -17,6 +17,11 @@ export interface BlockNodeData extends Record<string, unknown> {
    * rationale as WireEdgeData.flowName below: BlockNode needs it to send a
    * flow.fireNode request for @core/inject nodes. */
   flowName: string;
+  /** Wiring file this node belongs to — stitched in by FlowCanvas, not here
+   * (useFlowGraph has no notion of "which file", only a Wiring value), same
+   * as WireEdgeData.file below. BlockNode needs it to send a node.config
+   * mutation for a `control: {kind: "toggle"}` block's on-canvas switch. */
+  file?: string;
 }
 
 /** Every wire's edge.data — the actual port names, since handles no longer

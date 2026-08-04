@@ -1,4 +1,4 @@
-import type { AgentHassConfig, AgentOutputs } from "../ai/agent";
+import type { AgentHassConfig, AgentHassOutputs } from "../ai/agent";
 import { DEFAULT_TIMEOUT_MS } from "../ai/agent";
 import { DEFAULT_MAX_TURNS as OPENAI_DEFAULT_MAX_TURNS } from "../ai/openai-agent";
 import { defineBlock } from "../block";
@@ -16,7 +16,11 @@ import { defineBlock } from "../block";
  * maxTurns deliberately defaults to @ai/openai_agent's 4, not @ai/agent's
  * 6 — this block exists to be that block's like-for-like comparison.
  */
-export default defineBlock<AgentHassConfig, { prompt: unknown }, AgentOutputs>({
+export default defineBlock<
+  AgentHassConfig,
+  { prompt: unknown },
+  AgentHassOutputs
+>({
   name: "@ai/agent-hass",
   kind: "relay",
   config: {
@@ -29,5 +33,8 @@ export default defineBlock<AgentHassConfig, { prompt: unknown }, AgentOutputs>({
     enableTimerTools: false,
   },
   inputs: { prompt: {} as unknown },
-  outputs: { result: {} as AgentOutputs["result"] },
+  outputs: {
+    result: {} as AgentHassOutputs["result"],
+    delta: {} as AgentHassOutputs["delta"],
+  },
 });

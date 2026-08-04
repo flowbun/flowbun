@@ -241,6 +241,20 @@ export class Supervisor {
             msg.config,
             msg.agentKind,
             msg.deviceId,
+            // Streamed answer pieces, relayed to the owning flow-host as
+            // they arrive — same try/catch as the final result below, since
+            // the subprocess can be gone by the time any of them lands.
+            (text) => {
+              try {
+                subprocess.send({
+                  type: "agent.delta",
+                  requestId: msg.requestId,
+                  text,
+                } satisfies CoordinatorToFlowHost);
+              } catch {
+                // subprocess already gone; nothing to do.
+              }
+            },
           )
           .then((result) => {
             // The owning flow-host can have already exited (crash,

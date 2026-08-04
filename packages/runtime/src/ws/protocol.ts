@@ -1,3 +1,4 @@
+import type { BlockControl } from "../block";
 import type { LogRecord } from "../ipc/protocol";
 import type { Wiring } from "../wiring/schema";
 
@@ -65,6 +66,11 @@ export interface BlockPaletteEntry {
   outputs: Record<string, unknown>;
   /** The block's real default config value — the starting point for a freshly-dropped node's config-edit form. */
   defaultConfig: unknown;
+  /** Declarative on-canvas control (see block.ts's BlockControl) — lets
+   * BlockNode.tsx render e.g. a fire button or a toggle switch directly on
+   * the node, without hardcoding by block name. Absent for the common case
+   * of a block with no canvas-level control at all. */
+  control?: BlockControl;
 }
 
 export interface HassEntitySummary {

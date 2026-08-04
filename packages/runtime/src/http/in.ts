@@ -51,9 +51,34 @@ export interface HttpInReply {
   body?: unknown;
 }
 
+/**
+ * One streamed piece of a reply, delivered on the block's `chunk` input
+ * BEFORE the final `reply` message with the same requestId. The first chunk
+ * for a request switches its held-open response into streaming mode: 200
+ * with content-type application/x-ndjson, one `{"delta": <text>}` line per
+ * chunk, closed by a final `{"done": true, "status": ..., "body": ...}`
+ * line when the `reply` message lands (its status can no longer change the
+ * HTTP status line at that point — it rides in the done line instead).
+ * A request that never receives a chunk answers exactly as before, so
+ * callers that don't know about streaming see no difference.
+ */
+export interface HttpInChunk {
+  requestId: string;
+  text: string;
+}
+
 interface PendingRequest {
-  respond: (res: Response) => void;
-  timer: ReturnType<typeof setTimeout>;
+  /** Hands a Response to the held-open fetch() — no bookkeeping. In
+   * streaming mode this is called ONCE, at the first chunk, with the
+   * streaming Response; the entry then stays pending until the final
+   * reply/timeout so later chunks still find it. */
+  deliver: (res: Response) => void;
+  /** Clears the timeout and removes the entry from `pending` — every
+   * terminal path (normal reply, streamed done-line, timeout, shutdown)
+   * must end in exactly one finish(). */
+  finish: () => void;
+  /** Set once the first chunk arrives — see HttpInChunk. */
+  stream?: { write: (line: string) => void; close: () => void };
 }
 
 // Module-level, keyed by UUID rather than held per-server: process() (the
@@ -128,6 +153,7 @@ export async function startHttpIn(
       const requestId = crypto.randomUUID();
       const responsePromise = new Promise<Response>((resolve) => {
         const timer = setTimeout(() => {
+          const entry = pending.get(requestId);
           pending.delete(requestId);
           ownRequestIds.delete(requestId);
           log.warn("http_in.reply_timeout", {
@@ -135,19 +161,29 @@ export async function startHttpIn(
             path: url.pathname,
             timeoutMs: config.replyTimeoutMs,
           });
-          resolve(
-            jsonResponse(504, {
-              error: `no reply from flow within ${config.replyTimeoutMs}ms`,
-            }),
-          );
+          if (entry?.stream) {
+            // The 200 + NDJSON stream already went out at the first chunk —
+            // all that's left is to say why it's ending early, in-band.
+            entry.stream.write(
+              `${JSON.stringify({
+                error: `no final reply from flow within ${config.replyTimeoutMs}ms`,
+              })}\n`,
+            );
+            entry.stream.close();
+          } else {
+            resolve(
+              jsonResponse(504, {
+                error: `no reply from flow within ${config.replyTimeoutMs}ms`,
+              }),
+            );
+          }
         }, config.replyTimeoutMs);
         pending.set(requestId, {
-          timer,
-          respond: (res) => {
+          deliver: resolve,
+          finish: () => {
             clearTimeout(timer);
             pending.delete(requestId);
             ownRequestIds.delete(requestId);
-            resolve(res);
           },
         });
       });
@@ -180,9 +216,17 @@ export async function startHttpIn(
       // `true`): a force-close tears the socket down before those 503s can
       // actually flush, so the caller would see ECONNRESET instead.
       for (const requestId of [...ownRequestIds]) {
-        pending
-          .get(requestId)
-          ?.respond(jsonResponse(503, { error: "flow shutting down" }));
+        const entry = pending.get(requestId);
+        if (!entry) continue;
+        if (entry.stream) {
+          entry.stream.write(
+            `${JSON.stringify({ error: "flow shutting down" })}\n`,
+          );
+          entry.stream.close();
+        } else {
+          entry.deliver(jsonResponse(503, { error: "flow shutting down" }));
+        }
+        entry.finish();
       }
       void server.stop();
     },
@@ -199,6 +243,21 @@ export function answerHttpRequest(reply: HttpInReply): boolean {
   const entry = pending.get(reply.requestId);
   if (!entry) return false;
 
+  if (entry.stream) {
+    // Streaming mode: the status line went out with the first chunk, so
+    // the final status/body ride in the closing done-line instead.
+    entry.stream.write(
+      `${JSON.stringify({
+        done: true,
+        status: reply.status ?? 200,
+        body: reply.body ?? null,
+      })}\n`,
+    );
+    entry.finish();
+    entry.stream.close();
+    return true;
+  }
+
   const headers: Record<string, string> = { ...(reply.headers ?? {}) };
   let bodyText: string;
   if (reply.body === undefined) {
@@ -210,8 +269,55 @@ export function answerHttpRequest(reply: HttpInReply): boolean {
     bodyText = JSON.stringify(reply.body);
     headers["content-type"] ??= "application/json";
   }
-  entry.respond(
+  entry.deliver(
     new Response(bodyText, { status: reply.status ?? 200, headers }),
   );
+  entry.finish();
+  return true;
+}
+
+/**
+ * The chunk side — blocks/http-in.ts's process() forwards its `chunk` input
+ * here. The first chunk for a request delivers the streaming Response (200,
+ * application/x-ndjson) and every chunk — first included — writes one
+ * `{"delta": <text>}` line. Same false-on-unknown-id contract as
+ * answerHttpRequest: a chunk racing a timeout/answer is expected, not a bug.
+ */
+export function streamHttpChunk(chunk: HttpInChunk): boolean {
+  const entry = pending.get(chunk.requestId);
+  if (!entry) return false;
+
+  if (!entry.stream) {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c;
+      },
+    });
+    const encoder = new TextEncoder();
+    // enqueue/close throw once the client has gone away or the stream is
+    // already closed — a disconnect mid-stream must not take the node's
+    // Worker down with it, so both swallow. The reply timeout still ends
+    // the pending entry's lifecycle either way.
+    entry.stream = {
+      write: (line) => {
+        try {
+          controller.enqueue(encoder.encode(line));
+        } catch {}
+      },
+      close: () => {
+        try {
+          controller.close();
+        } catch {}
+      },
+    };
+    entry.deliver(
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" },
+      }),
+    );
+  }
+  entry.stream.write(`${JSON.stringify({ delta: chunk.text })}\n`);
   return true;
 }

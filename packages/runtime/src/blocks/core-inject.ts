@@ -9,8 +9,12 @@ export default defineBlock<InjectConfig, Record<string, never>, InjectOutputs>({
   // what actually makes it work: the coordinator relays a browser button
   // click to the owning flow-host over IPC (flow.fireNode), which checks
   // this flag (rather than a hardcoded block-name check) before calling
-  // router.emitFromSource() directly — see flow-host/src/main.ts.
+  // router.emitFromSource() directly — see flow-host/src/main.ts. `control`
+  // is the separate, purely-editor-facing half: it's what tells BlockNode.tsx
+  // to render the Fire button at all (see block.ts's BlockControl doc
+  // comment) — fireable alone would leave this fireable but buttonless.
   fireable: true,
+  control: { kind: "fire" },
   config: { label: "" },
   inputs: {},
   outputs: { fired: {} as InjectOutputs["fired"] },

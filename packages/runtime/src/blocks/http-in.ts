@@ -1,6 +1,11 @@
 import { defineBlock } from "../block";
-import type { HttpInConfig, HttpInReply, HttpInRequest } from "../http/in";
-import { answerHttpRequest, startHttpIn } from "../http/in";
+import type {
+  HttpInChunk,
+  HttpInConfig,
+  HttpInReply,
+  HttpInRequest,
+} from "../http/in";
+import { answerHttpRequest, startHttpIn, streamHttpChunk } from "../http/in";
 
 /**
  * The block definition itself — see hass-trigger.ts's own doc comment on why
@@ -17,7 +22,7 @@ import { answerHttpRequest, startHttpIn } from "../http/in";
  */
 export default defineBlock<
   HttpInConfig,
-  { reply: HttpInReply },
+  { reply: HttpInReply; chunk: HttpInChunk },
   { request: HttpInRequest }
 >({
   name: "@http/in",
@@ -29,7 +34,7 @@ export default defineBlock<
     token: "",
     replyTimeoutMs: 30_000,
   },
-  inputs: { reply: {} as HttpInReply },
+  inputs: { reply: {} as HttpInReply, chunk: {} as HttpInChunk },
   outputs: { request: {} as HttpInRequest },
   async subscribe(ctx, emit) {
     const { stop } = await startHttpIn(ctx.config, ctx.log, (request) =>
@@ -38,6 +43,16 @@ export default defineBlock<
     return stop;
   },
   async process(inputs, ctx) {
+    if (inputs.chunk !== undefined) {
+      // A chunk racing the final answer/timeout is an expected, harmless
+      // race — debug, not warn, unlike an unmatched final reply below.
+      if (!streamHttpChunk(inputs.chunk)) {
+        ctx.log.debug("http_in.chunk_after_close", {
+          requestId: inputs.chunk.requestId,
+        });
+      }
+      return;
+    }
     const reply = inputs.reply;
     if (!answerHttpRequest(reply)) {
       ctx.log.warn("http_in.unknown_request_id", {

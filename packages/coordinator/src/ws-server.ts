@@ -111,6 +111,7 @@ export function buildPalette(
       Object.keys(entry.def.outputs).map((k) => [k, null]),
     ),
     defaultConfig: entry.def.config,
+    control: entry.def.control,
   }));
 }
 

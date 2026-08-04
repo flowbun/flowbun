@@ -26,6 +26,13 @@ export interface LogRecord {
 // ---------- coordinator -> flow-host (Bun.spawn ipc) ----------
 export type CoordinatorToFlowHost =
   | { type: "flow.fireNode"; requestId: number; nodeId: string }
+  /** A piece of the agent's answer text, streamed while the agent.call
+   * carrying the same requestId is still in flight — the flow-host emits it
+   * on the calling node's `delta` output port (see DistributedExecutor.
+   * handleAgentDelta) so a flow can start speaking/rendering before the
+   * final agent.result lands. Ordering with agent.result is guaranteed by
+   * the ipc channel; a delta arriving after its call settled is dropped. */
+  | { type: "agent.delta"; requestId: number; text: string }
   | {
       type: "agent.result";
       requestId: number;
@@ -153,6 +160,9 @@ export type CoordinatorToAiHost =
 export type AiHostToCoordinator =
   | { type: "ready" }
   | { type: "tool.call"; requestId: number; tool: string; args: unknown }
+  /** Streamed answer text for an in-flight agent.call — relayed onward as
+   * CoordinatorToFlowHost's own agent.delta (see its doc comment). */
+  | { type: "agent.delta"; requestId: number; text: string }
   | { type: "chat.event"; event: ChatEvent }
   /** Mirrors AgentRunner's internal `busy` flag out to the coordinator, so
    * ws-server.ts's "chat.send" handler can keep doing its existing

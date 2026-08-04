@@ -118,10 +118,10 @@ async function scanBlockDir(
 }
 
 /**
- * Scans `packages/runtime/src/blocks/*.ts` (the nine built-in blocks —
+ * Scans `packages/runtime/src/blocks/*.ts` (the built-in blocks —
  * `@hass/trigger`, `@hass/action`, `@hass/read`, `@core/scheduler`,
- * `@core/inject`, `@core/debug`, `@ai/agent`, `@http/in`, `@ai/openai_agent`)
- * and `<dataDir>/blocks/*.ts`
+ * `@core/inject`, `@core/debug`, `@core/switch`, `@ai/agent`,
+ * `@ai/agent-hass`, `@http/in`, `@ai/openai_agent`) and `<dataDir>/blocks/*.ts`
  * (everything a user has written), registering both sets through the exact
  * same scan/import/validate path — see scanBlockDir's own doc comment.
  */

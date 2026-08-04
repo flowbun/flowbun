@@ -41,6 +41,12 @@ export interface AgentNodeCaller {
     config: AnyAgentConfig,
     agentKind?: AgentCallKind,
     deviceId?: string,
+    /** Streamed pieces of the answer text, called zero or more times
+     * before the returned promise settles — only "hass" calls stream
+     * (includePartialMessages is enabled for them alone), and pieces are
+     * batched on a short timer (see deltaFlushMs) so a fast token stream
+     * doesn't become an IPC message per token. */
+    onDelta?: (text: string) => void,
   ): Promise<AgentCallResult>;
   /** Aborts every in-flight call belonging to `flowName` — called when that
    * flow's flow-host is about to be killed for a restart/stop, so a call
@@ -70,6 +76,11 @@ export interface AgentNodeCallerOptions {
    * are legitimately silent. Default DEFAULT_STALL_TIMEOUT_MS; tests inject
    * a tiny value. */
   stallTimeoutMs?: number;
+  /** Streamed text deltas are accumulated and flushed to onDelta at most
+   * once per this interval — token-level events arrive every few dozen ms,
+   * and each flush costs three IPC hops plus a router fan-out downstream.
+   * Default DEFAULT_DELTA_FLUSH_MS; tests inject a tiny value. */
+  deltaFlushMs?: number;
 }
 
 type QueryFn = typeof query;
@@ -93,6 +104,59 @@ const HOT_SESSION_IDLE_MS = 60 * 60_000;
 // round-trip, while still leaving room for a fresh-session retry to finish
 // inside a voice flow's ~25s reply budget.
 export const DEFAULT_STALL_TIMEOUT_MS = 12_000;
+
+// See AgentNodeCallerOptions.deltaFlushMs. 120ms is far below anything a
+// listener could perceive (HA's streaming TTS only engages after ~60 chars
+// anyway) while collapsing a per-few-tokens event stream ~5-10x.
+export const DEFAULT_DELTA_FLUSH_MS = 120;
+
+/** Extracts the answer-text piece from one SDK message, or null for
+ * anything that isn't a top-level assistant text delta (tool-use deltas,
+ * thinking deltas, subagent streams, lifecycle events). Requires
+ * includePartialMessages on the query — without it no stream_event
+ * messages exist and streaming silently never happens. */
+// biome-ignore lint/suspicious/noExplicitAny: same wide-SDK-union narrowing as resultFromMessage below
+function textDeltaFromMessage(message: any): string | null {
+  if (message?.type !== "stream_event" || message.parent_tool_use_id) {
+    return null;
+  }
+  const event = message.event;
+  if (event?.type !== "content_block_delta") return null;
+  return event.delta?.type === "text_delta" &&
+    typeof event.delta.text === "string"
+    ? event.delta.text
+    : null;
+}
+
+/** Time-batches delta text: pieces accumulate and flush to onDelta at most
+ * once per flushMs. flush() is also called directly before a result is
+ * returned, so the tail of the answer is never left behind on a timer that
+ * would outlive the call. */
+function makeDeltaBatcher(
+  onDelta: (text: string) => void,
+  flushMs: number,
+): { push: (text: string) => void; flush: () => void } {
+  let buf = "";
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (buf) {
+      const text = buf;
+      buf = "";
+      onDelta(text);
+    }
+  };
+  return {
+    push: (text) => {
+      buf += text;
+      timer ??= setTimeout(flush, flushMs);
+    },
+    flush,
+  };
+}
 
 /** Thrown by the read loops when the stream stalls; call() keys its
  * retry-once behavior off this marker string, so keep it distinctive. */
@@ -259,6 +323,9 @@ export function createAgentNodeCaller(
         maxTurns,
         abortController,
         tools: [],
+        // Emits stream_event messages carrying token-level text deltas —
+        // what the delta streaming below (textDeltaFromMessage) feeds on.
+        includePartialMessages: true,
         mcpServers: {
           hass: createHassAgentMcpServer(
             {
@@ -352,6 +419,7 @@ export function createAgentNodeCaller(
     maxTurns: number,
     kind: AgentCallKind,
     deviceId: string | undefined,
+    onDelta?: (text: string) => void,
   ): Promise<AgentCallResult> {
     const abortController = new AbortController();
     const untrack = track(flowName, abortController);
@@ -368,6 +436,9 @@ export function createAgentNodeCaller(
         ),
       });
 
+      const batcher = onDelta
+        ? makeDeltaBatcher(onDelta, opts.deltaFlushMs ?? DEFAULT_DELTA_FLUSH_MS)
+        : null;
       // fullAccess turns run long, legitimately silent tools (Bash,
       // WebFetch) — the stall watchdog only guards bounded calls.
       const stallMs = isFullAccess(config, kind)
@@ -387,8 +458,15 @@ export function createAgentNodeCaller(
           if (next.done) {
             return { ok: false, error: "agent stream ended without a result" };
           }
+          if (batcher) {
+            const piece = textDeltaFromMessage(next.value);
+            if (piece !== null) batcher.push(piece);
+          }
           const settled = resultFromMessage(next.value);
-          if (settled) return settled;
+          if (settled) {
+            batcher?.flush();
+            return settled;
+          }
         }
       })();
       // If `timeout` wins the race, `consume` is still running in the
@@ -484,6 +562,7 @@ export function createAgentNodeCaller(
     maxTurns: number,
     kind: AgentCallKind,
     deviceId: string | undefined,
+    onDelta?: (text: string) => void,
   ): Promise<AgentCallResult> {
     const key = `${flowName}::${nodeId}`;
     const fingerprint = JSON.stringify({ kind, config });
@@ -502,6 +581,7 @@ export function createAgentNodeCaller(
         maxTurns,
         kind,
         deviceId,
+        onDelta,
       );
     }
     if (session && (session.dead || session.fingerprint !== fingerprint)) {
@@ -521,6 +601,9 @@ export function createAgentNodeCaller(
     const timeout = turnTimeout(nodeId, timeoutMs, session.abortController);
     try {
       session.push(promptText);
+      const batcher = onDelta
+        ? makeDeltaBatcher(onDelta, opts.deltaFlushMs ?? DEFAULT_DELTA_FLUSH_MS)
+        : null;
       const stallMs = isFullAccess(config, kind)
         ? 0
         : (opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS);
@@ -533,8 +616,15 @@ export function createAgentNodeCaller(
           if (next.done) {
             return { ok: false, error: "agent stream ended without a result" };
           }
+          if (batcher) {
+            const piece = textDeltaFromMessage(next.value);
+            if (piece !== null) batcher.push(piece);
+          }
           const settled = resultFromMessage(next.value);
-          if (settled) return settled;
+          if (settled) {
+            batcher?.flush();
+            return settled;
+          }
         }
       })();
       readUntilResult.catch(() => {});
@@ -574,6 +664,7 @@ export function createAgentNodeCaller(
     config: AnyAgentConfig,
     agentKind: AgentCallKind = "full",
     deviceId?: string,
+    onDelta?: (text: string) => void,
   ): Promise<AgentCallResult> {
     if (!hasClaudeCredentials(opts.claudeConfigDir)) {
       return {
@@ -603,6 +694,7 @@ export function createAgentNodeCaller(
             maxTurns,
             agentKind,
             deviceId,
+            onDelta,
           )
         : oneShotCall(
             flowName,
@@ -613,6 +705,7 @@ export function createAgentNodeCaller(
             maxTurns,
             agentKind,
             deviceId,
+            onDelta,
           );
 
     const result = await attempt();

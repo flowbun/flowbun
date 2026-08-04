@@ -50,6 +50,7 @@ function config(overrides: Partial<OpenAiAgentConfig> = {}): OpenAiAgentConfig {
     enableHassTools: false,
     enableTimerTools: false,
     extraBody: {},
+    stream: false,
     ...overrides,
   };
 }
@@ -59,6 +60,24 @@ function chatResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+/** One SSE stream from `data:` payload objects, closed with [DONE] — the
+ * shape llama-server emits for stream:true. */
+function sseResponse(...payloads: unknown[]): Response {
+  const lines = [
+    ...payloads.map((p) => `data: ${JSON.stringify(p)}`),
+    "data: [DONE]",
+    "",
+  ];
+  return new Response(lines.join("\n\n"), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+function sseContent(text: string): unknown {
+  return { choices: [{ delta: { content: text } }] };
 }
 
 function successMessage(content: string) {
@@ -112,6 +131,114 @@ describe("runOpenAiAgent", () => {
       durationMs: expect.any(Number),
       numTurns: 1,
     });
+  });
+
+  test("stream:true consumes SSE, emits onDelta pieces, and returns the full text", async () => {
+    let seenBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      seenBody = JSON.parse(init.body as string);
+      return sseResponse(
+        sseContent("The coffee "),
+        sseContent("machine is "),
+        // A reasoning delta (thinking model) must never reach the answer.
+        { choices: [{ delta: { reasoning_content: "hmm..." } }] },
+        sseContent("off."),
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+      );
+    }) as unknown as typeof fetch;
+
+    const deltas: string[] = [];
+    const result = await runOpenAiAgent(
+      config({ stream: true }),
+      { prompt: "is it on?", meta: { requestId: "r1" } },
+      noopLog,
+      {
+        onDelta: (text, meta) => deltas.push(`${text}|${JSON.stringify(meta)}`),
+      },
+    );
+
+    expect(seenBody?.stream).toBe(true);
+    expect(result.text).toBe("The coffee machine is off.");
+    expect(result.meta).toEqual({ requestId: "r1" });
+    // Batching may coalesce pieces; concatenated they are exactly the
+    // answer, each flush carrying the held-back meta echo.
+    expect(deltas.length).toBeGreaterThan(0);
+    expect(deltas.every((d) => d.endsWith('|{"requestId":"r1"}'))).toBe(true);
+    expect(deltas.map((d) => d.split("|")[0]).join("")).toBe(
+      "The coffee machine is off.",
+    );
+  });
+
+  test("stream:true reassembles incremental tool_calls fragments and runs the tool loop", async () => {
+    setHassReadTransport({
+      readEntity: async (entity) => ({
+        entity,
+        state: "off",
+        attributes: {},
+      }),
+    });
+    let turn = 0;
+    globalThis.fetch = (async () => {
+      turn++;
+      if (turn === 1) {
+        // llama-server's verified wire shape: first fragment carries
+        // id/name + opening arguments piece, later ones append arguments.
+        return sseResponse(
+          { choices: [{ delta: { role: "assistant", content: null } }] },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call_9",
+                      type: "function",
+                      function: { name: "hass_get_state", arguments: "{" },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, function: { arguments: '"entity":"switch.' } },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, function: { arguments: 'coffee_machine"}' } },
+                  ],
+                },
+              },
+            ],
+          },
+        );
+      }
+      return sseResponse(sseContent("It is off."));
+    }) as unknown as typeof fetch;
+
+    const deltas: string[] = [];
+    const result = await runOpenAiAgent(
+      config({ stream: true, enableHassTools: true }),
+      "is the coffee machine on?",
+      noopLog,
+      { onDelta: (text) => deltas.push(text) },
+    );
+
+    expect(result.text).toBe("It is off.");
+    expect(result.numTurns).toBe(2);
+    expect(deltas.join("")).toBe("It is off.");
   });
 
   test("merges extraBody into the request body, overriding standard fields", async () => {

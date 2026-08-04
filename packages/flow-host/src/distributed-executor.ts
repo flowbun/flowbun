@@ -43,6 +43,11 @@ interface PendingAgentCall {
     numTurns: number;
   }) => void;
   reject: (e: Error) => void;
+  /** For routing streamed agent.delta messages (see handleAgentDelta) back
+   * to the calling node's `delta` port, with the held-back `meta` echo
+   * re-attached exactly like the final result gets it. */
+  nodeId: string;
+  meta: unknown;
 }
 
 /**
@@ -71,6 +76,11 @@ export class DistributedExecutor implements NodeExecutor {
       workerManager: WorkerManager;
       send: (msg: FlowHostToCoordinator) => void;
       log: Logger;
+      /** Emits a streamed agent delta on a relay node's `delta` output port
+       * — wired by main.ts to router.emitFromSource, the same out-of-band
+       * entry point a subscribing block's Worker events use. Optional only
+       * for tests that never stream. */
+      emitDelta?: (nodeId: string, payload: Record<string, unknown>) => void;
       /** Overridable for tests only — production always gets the real
        * AGENT_CALL_TIMEOUT_MARGIN_MS default. */
       agentCallTimeoutMarginMs?: number;
@@ -161,7 +171,24 @@ export class DistributedExecutor implements NodeExecutor {
           clearTimeout(timer);
           reject(e);
         },
+        nodeId,
+        meta,
       });
+    });
+  }
+
+  /** Emits one streamed answer piece on the calling node's `delta` port —
+   * only while its agent.call is still pending, so a delta racing the final
+   * result/timeout is silently dropped (matching the http/in chunk race's
+   * own semantics downstream). */
+  handleAgentDelta(
+    msg: Extract<CoordinatorToFlowHost, { type: "agent.delta" }>,
+  ): void {
+    const pending = this.pendingAgentCalls.get(msg.requestId);
+    if (!pending || !this.deps.emitDelta) return;
+    this.deps.emitDelta(pending.nodeId, {
+      text: msg.text,
+      ...(pending.meta === undefined ? {} : { meta: pending.meta }),
     });
   }
 

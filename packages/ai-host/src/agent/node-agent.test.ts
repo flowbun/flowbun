@@ -193,6 +193,74 @@ describe("createAgentNodeCaller", () => {
     expect(calls[0]?.options?.permissionMode).toBeUndefined();
   });
 
+  test("hass calls stream batched text deltas to onDelta before the result settles", async () => {
+    const streamEvent = (text: string) =>
+      ({
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text },
+        },
+        parent_tool_use_id: null,
+        session_id: "s1",
+        uuid: UUID,
+      }) as unknown as SDKMessage;
+    const fakeQuery = (() => {
+      async function* gen() {
+        yield streamEvent("The coffee ");
+        yield streamEvent("machine is ");
+        // A tool-use delta must never leak into the answer stream.
+        yield {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: "{}" },
+          },
+          parent_tool_use_id: null,
+        } as unknown as SDKMessage;
+        yield streamEvent("off.");
+        yield resultSuccess("The coffee machine is off.");
+      }
+      return gen();
+    }) as unknown as typeof query;
+
+    const caller = createAgentNodeCaller(
+      { claudeConfigDir: authedDir, cwd: dir, deltaFlushMs: 1 },
+      noopCallTool,
+      fakeQuery,
+    );
+    const deltas: string[] = [];
+    const result = await caller.call(
+      "flow1",
+      "n1",
+      "hi",
+      {
+        systemPrompt: "voice",
+        model: "",
+        maxTurns: 4,
+        timeoutMs: 5000,
+        persistSession: false,
+        enableHassTools: true,
+        enableTimerTools: false,
+      },
+      "hass",
+      undefined,
+      (text) => deltas.push(text),
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      text: "The coffee machine is off.",
+      costUsd: 0.05,
+      durationMs: 100,
+      numTurns: 2,
+    });
+    // Batching may coalesce pieces, but concatenated they are exactly the
+    // spoken text, with the tool-use delta excluded.
+    expect(deltas.join("")).toBe("The coffee machine is off.");
+    expect(deltas.length).toBeGreaterThan(0);
+  });
+
   test("fullAccess mode omits `tools` (inherits built-ins) and sets bypassPermissions", async () => {
     const calls: Array<{
       options?: {

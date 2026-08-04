@@ -40,6 +40,7 @@ export interface AiHostClient {
     config: AnyAgentConfig,
     agentKind?: AgentCallKind,
     deviceId?: string,
+    onDelta?: (text: string) => void,
   ): Promise<AgentCallResult>;
   cancelForFlow(flowName: string): void;
   stop(): void;
@@ -127,7 +128,10 @@ export function createAiHostClient(opts: AiHostClientOptions): AiHostClient {
     number,
     (r: { ok: boolean; error?: string; events?: ChatEvent[] }) => void
   >();
-  const pendingAgentCalls = new Map<number, (r: AgentCallResult) => void>();
+  const pendingAgentCalls = new Map<
+    number,
+    { resolve: (r: AgentCallResult) => void; onDelta?: (text: string) => void }
+  >();
 
   function spawnChannel(): AiHostChannel {
     return (opts.spawn ?? spawnAiHost)(opts.dataDir, onMessage, onAiHostExit);
@@ -204,11 +208,15 @@ export function createAiHostClient(opts: AiHostClientOptions): AiHostClient {
         resolve({ ok: msg.ok, error: msg.error, events: msg.events });
         break;
       }
+      case "agent.delta": {
+        pendingAgentCalls.get(msg.requestId)?.onDelta?.(msg.text);
+        break;
+      }
       case "agent.result": {
-        const resolve = pendingAgentCalls.get(msg.requestId);
-        if (!resolve) break;
+        const pending = pendingAgentCalls.get(msg.requestId);
+        if (!pending) break;
         pendingAgentCalls.delete(msg.requestId);
-        resolve(
+        pending.resolve(
           msg.ok
             ? {
                 ok: true,
@@ -261,10 +269,11 @@ export function createAiHostClient(opts: AiHostClientOptions): AiHostClient {
     config: AnyAgentConfig,
     agentKind?: AgentCallKind,
     deviceId?: string,
+    onDelta?: (text: string) => void,
   ): Promise<AgentCallResult> {
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
-      pendingAgentCalls.set(requestId, resolve);
+      pendingAgentCalls.set(requestId, { resolve, onDelta });
       send({
         type: "agent.call",
         requestId,

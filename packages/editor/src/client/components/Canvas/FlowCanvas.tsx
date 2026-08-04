@@ -124,7 +124,14 @@ function Inner({
   // Edges are tagged "deletable" (a tap/click target for the X button — see
   // DeletableEdge) since mobile has no Backspace key to trigger onEdgesDelete.
   useEffect(() => {
-    setNodes(graphNodes);
+    setNodes(
+      // Same "only `file` needs stitching in here" reasoning as the edges
+      // map just below — see BlockNodeData.file's own comment.
+      graphNodes.map((n) => ({
+        ...n,
+        data: { ...(n.data as BlockNodeData), file },
+      })),
+    );
     setEdges(
       // useFlowGraph always populates sourcePort/targetPort on every edge —
       // only `file` needs stitching in here, since useFlowGraph has no

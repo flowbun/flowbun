@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Logger } from "../block";
 import type { HttpInConfig, HttpInRequest } from "./in";
-import { answerHttpRequest, startHttpIn } from "./in";
+import { answerHttpRequest, startHttpIn, streamHttpChunk } from "./in";
 
 const silentLog: Logger = {
   debug: () => {},
@@ -153,6 +153,69 @@ describe("startHttpIn / answerHttpRequest", () => {
     const res = await fetch(`http://127.0.0.1:${port}/`);
     expect(res.status).toBe(504);
     expect(answerHttpRequest({ requestId: lateId })).toBe(false);
+  });
+
+  test("chunks stream as NDJSON delta lines closed by the reply's done line", async () => {
+    const port = await start(config(), (req) => {
+      expect(streamHttpChunk({ requestId: req.requestId, text: "Hel" })).toBe(
+        true,
+      );
+      expect(streamHttpChunk({ requestId: req.requestId, text: "lo." })).toBe(
+        true,
+      );
+      answerHttpRequest({
+        requestId: req.requestId,
+        body: { text: "Hello.", conversation_id: "c1" },
+      });
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hi" }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson");
+    const lines = (await res.text())
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(lines).toEqual([
+      { delta: "Hel" },
+      { delta: "lo." },
+      {
+        done: true,
+        status: 200,
+        body: { text: "Hello.", conversation_id: "c1" },
+      },
+    ]);
+  });
+
+  test("a request that never chunks answers plain JSON exactly as before", async () => {
+    const port = await start(config(), (req) => {
+      answerHttpRequest({ requestId: req.requestId, body: { text: "hi" } });
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/`, { method: "POST" });
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(await res.json()).toEqual({ text: "hi" });
+  });
+
+  test("timeout mid-stream ends the NDJSON body with an in-band error line", async () => {
+    const port = await start(config({ replyTimeoutMs: 80 }), (req) => {
+      streamHttpChunk({ requestId: req.requestId, text: "partial" });
+      // ...and no final reply ever arrives.
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/`, { method: "POST" });
+    expect(res.status).toBe(200); // status went out with the first chunk
+    const lines = (await res.text())
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(lines[0]).toEqual({ delta: "partial" });
+    expect(lines[1]?.error).toContain("no final reply");
+  });
+
+  test("a chunk for an unknown/settled requestId returns false", () => {
+    expect(streamHttpChunk({ requestId: "nope", text: "x" })).toBe(false);
   });
 
   test("unknown requestId returns false", () => {

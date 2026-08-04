@@ -43,6 +43,34 @@ export type FiringInputs<Inputs extends PortShape> = {
   };
 }[keyof Inputs];
 
+/**
+ * Declarative "put a control on the node itself" hint for the editor's
+ * canvas (BlockNode.tsx) — a control is purely a rendering instruction, not
+ * a behavior change: what actually happens on click still goes through
+ * completely ordinary means already in the system. A `"toggle"` click is
+ * just a normal `node.config` wiring mutation, the same one the side-panel
+ * config editor already sends. A `"fire"` click is still gated by
+ * `SourceBlockDef.fireable` server-side (see flow-host/src/main.ts's
+ * `flow.fireNode` handler) — `control` here only tells the canvas to render
+ * the button, replacing what used to be a hardcoded
+ * `block === "@core/inject"` check in BlockNode.tsx. Optional on every
+ * kind, since it's just UI metadata: a transform can have a toggle, a
+ * source can have a fire button (or neither), nothing requires one.
+ */
+export type BlockControl =
+  | { kind: "fire" }
+  // Two-state switch rendered directly on the node: clicking a side writes
+  // that side's value into `config[configKey]` (an ordinary node.config
+  // mutation) — @core/switch is the first block to use this, but nothing
+  // here is @core/switch-specific.
+  | {
+      kind: "toggle";
+      configKey: string;
+      values: [unknown, unknown];
+      /** Shown on each side instead of `String(values[n])`, when set. */
+      labels?: [string, string];
+    };
+
 interface BlockDefBase<
   Config,
   Inputs extends PortShape,
@@ -52,6 +80,7 @@ interface BlockDefBase<
   config: Config;
   inputs: Inputs;
   outputs: Outputs;
+  control?: BlockControl;
 }
 
 /** An ordinary block: fires once per message arriving at one input port, returns (or emits nothing for) the ports it produced. The default kind — `kind` may be omitted. */

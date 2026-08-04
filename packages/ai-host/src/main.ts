@@ -144,6 +144,8 @@ async function main(): Promise<void> {
             msg.config,
             msg.agentKind,
             msg.deviceId,
+            (text) =>
+              send({ type: "agent.delta", requestId: msg.requestId, text }),
           )
           .then((result) => {
             send({ type: "agent.result", requestId: msg.requestId, ...result });

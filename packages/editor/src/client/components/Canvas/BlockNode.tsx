@@ -12,9 +12,18 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
   const outputs = data.def ? Object.keys(data.def.outputs) : [];
   const lastProcessedAt = useLastProcessed(data.nodeId);
   const { send } = useFlowbunSocket();
-  const isInject = data.block === "@core/inject";
+  // Declarative on-canvas control (see block.ts's BlockControl) — replaces
+  // what used to be a hardcoded `data.block === "@core/inject"` check, so
+  // any future control (this toggle included) only ever needs a case here,
+  // never a new per-block-name branch.
+  const control = data.def?.control;
+  const isFire = control?.kind === "fire";
+  // @core/inject's own config carries a user-customizable button label —
+  // specific to the "fire" control, not part of BlockControl's generic
+  // shape (every inject *node* can have its own label; a control is
+  // per-block-type, not per-node).
   const injectLabel =
-    (isInject && (data.config as { label?: string } | undefined)?.label) ||
+    (isFire && (data.config as { label?: string } | undefined)?.label) ||
     "Fire";
 
   async function handleFire(): Promise<void> {
@@ -26,6 +35,25 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
     });
     if (result.type === "flow.fireNodeResult" && !result.ok) {
       console.error("inject fire failed:", result.error);
+    }
+  }
+
+  async function handleToggleSelect(value: unknown): Promise<void> {
+    if (control?.kind !== "toggle" || !data.file) return;
+    const currentConfig = (data.config as Record<string, unknown> | null) ?? {};
+    if (currentConfig[control.configKey] === value) return; // already selected
+    const result = await send({
+      type: "wiring.mutate",
+      requestId: generateRequestId(),
+      file: data.file,
+      mutation: {
+        op: "node.config",
+        nodeId: data.nodeId,
+        config: { ...currentConfig, [control.configKey]: value },
+      },
+    });
+    if (result.type === "wiring.mutateResult" && !result.ok) {
+      console.error("toggle failed:", result.error);
     }
   }
 
@@ -80,7 +108,7 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
       >
         {data.block}
       </div>
-      {isInject && (
+      {isFire && (
         <div style={{ padding: "0 10px 8px" }}>
           <button
             type="button"
@@ -102,6 +130,49 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
           >
             ▶ {injectLabel}
           </button>
+        </div>
+      )}
+      {control?.kind === "toggle" && (
+        <div style={{ padding: "0 10px 8px" }}>
+          <div
+            className="nodrag nopan"
+            style={{
+              display: "flex",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              overflow: "hidden",
+            }}
+          >
+            {control.values.map((value, i) => {
+              const label = control.labels?.[i] ?? String(value);
+              const active =
+                (data.config as Record<string, unknown> | null)?.[
+                  control.configKey
+                ] === value;
+              return (
+                <button
+                  key={label}
+                  type="button"
+                  disabled={data.disabled || active}
+                  title={label}
+                  onClick={() => handleToggleSelect(value)}
+                  style={{
+                    flex: 1,
+                    padding: "3px 6px",
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: active ? "var(--bg)" : "var(--text-dim)",
+                    background: active ? "var(--accent)" : "var(--bg)",
+                    border: "none",
+                    borderLeft: i > 0 ? "1px solid var(--border)" : "none",
+                    cursor: data.disabled || active ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
       {lastProcessedAt !== undefined && (

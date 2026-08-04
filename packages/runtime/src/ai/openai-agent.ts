@@ -92,12 +92,32 @@ export interface OpenAiAgentConfig {
    * token budget on reasoning, or `top_p`/`min_p` sampling overrides.
    */
   extraBody: Record<string, unknown>;
+  /**
+   * Requests server-sent-events streaming (`"stream": true`) from the
+   * server and emits answer text out the block's `delta` port as it
+   * generates — the same delta contract @ai/agent-hass streams (see
+   * AgentHassOutputs in agent.ts), so a flow wired for one streams from
+   * either. Off by default: the non-streamed path is the lowest common
+   * denominator every OpenAI-compatible server handles, while streamed
+   * TOOL CALLS specifically need a server that reassembles them properly
+   * (llama.cpp does, verified against its incremental tool_calls deltas;
+   * enable against anything else only after checking).
+   */
+  stream: boolean;
 }
 
-/** Per-call context the block's process() threads through — see
- * HassAgentHooks (hass-tools.ts), where the shared tool executor and its
- * documentation now live. */
-export type OpenAiAgentHooks = HassAgentHooks;
+/** Per-call context the block's process() threads through — the shared
+ * hooks (see HassAgentHooks in hass-tools.ts, where the tool executor and
+ * its documentation live) plus this block's own streaming callback. */
+export type OpenAiAgentHooks = HassAgentHooks & {
+  /** Streamed pieces of the answer text, called zero or more times before
+   * runOpenAiAgent resolves — only when config.stream is on. `meta` is the
+   * same held-back input echo the final result carries, re-attached so the
+   * block can stamp it onto each delta for downstream correlation. Pieces
+   * are time-batched (DELTA_FLUSH_MS) like @ai/agent-hass's, so a fast
+   * server doesn't become a message per token. */
+  onDelta?: (text: string, meta: unknown) => void;
+};
 
 export const DEFAULT_MAX_TURNS = 4;
 export const DEFAULT_MAX_TOKENS = 512;
@@ -120,6 +140,137 @@ interface ChatCompletionResponse {
   choices?: Array<{
     message?: { content: string | null; tool_calls?: ToolCall[] };
   }>;
+}
+
+/** One `data:` line's delta in a streamed response (chat.completion.chunk).
+ * tool_calls arrive incrementally: the first fragment for an `index`
+ * carries id/name plus the opening arguments piece, later fragments append
+ * to `arguments` — consumeSseTurn below reassembles by index (the format
+ * llama.cpp's llama-server was verified to emit; also OpenAI's own). */
+interface StreamedDelta {
+  content?: string | null;
+  reasoning_content?: string | null;
+  tool_calls?: Array<{
+    index?: number;
+    id?: string;
+    function?: { name?: string; arguments?: string };
+  }>;
+}
+
+// Streamed answer pieces flush to onDelta at most once per this interval —
+// mirrors ai-host's DEFAULT_DELTA_FLUSH_MS reasoning: each flush becomes a
+// Worker event plus a router fan-out, and a fast server's per-token events
+// would otherwise become one message each.
+const DELTA_FLUSH_MS = 120;
+
+function makeDeltaBatcher(
+  onDelta: (text: string) => void,
+  flushMs = DELTA_FLUSH_MS,
+): { push: (text: string) => void; flush: () => void } {
+  let buf = "";
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (buf) {
+      const text = buf;
+      buf = "";
+      onDelta(text);
+    }
+  };
+  return {
+    push: (text) => {
+      buf += text;
+      timer ??= setTimeout(flush, flushMs);
+    },
+    flush,
+  };
+}
+
+/**
+ * Reads one streamed completion (SSE `data:` lines ending in `[DONE]`) into
+ * the same `{content, tool_calls}` message shape the non-streamed path gets
+ * from the response JSON — the tool loop downstream is identical either
+ * way. Answer text (`delta.content`) is ALSO pushed to `emitDelta` as it
+ * arrives; reasoning deltas (a thinking model with thinking left on) are
+ * deliberately not — they were never part of the spoken answer.
+ */
+async function consumeSseTurn(
+  res: Response,
+  endpoint: string,
+  emitDelta: ((text: string) => void) | null,
+): Promise<{ content: string | null; tool_calls?: ToolCall[] }> {
+  if (!res.body) {
+    throw new Error(`@ai/openai_agent: ${endpoint} streamed no response body`);
+  }
+  let content = "";
+  let sawContent = false;
+  const toolCalls: ToolCall[] = [];
+  const decoder = new TextDecoder();
+  let pending = "";
+  const reader = res.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      let nl = pending.indexOf("\n");
+      while (nl >= 0) {
+        const line = pending.slice(0, nl).trim();
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        let delta: StreamedDelta | undefined;
+        try {
+          delta = (
+            JSON.parse(payload) as {
+              choices?: Array<{ delta?: StreamedDelta }>;
+            }
+          ).choices?.[0]?.delta;
+        } catch {
+          continue; // tolerate a torn/garbled event, keep reading
+        }
+        if (!delta) continue;
+        if (typeof delta.content === "string" && delta.content !== "") {
+          sawContent = true;
+          content += delta.content;
+          emitDelta?.(delta.content);
+        }
+        for (const fragment of delta.tool_calls ?? []) {
+          const index = fragment.index ?? 0;
+          let call = toolCalls[index];
+          if (!call) {
+            call = {
+              id: fragment.id ?? `call_${index}`,
+              type: "function",
+              function: { name: fragment.function?.name ?? "", arguments: "" },
+            };
+            toolCalls[index] = call;
+          }
+          if (fragment.id) call.id = fragment.id;
+          if (fragment.function?.name)
+            call.function.name = fragment.function.name;
+          if (fragment.function?.arguments) {
+            call.function.arguments += fragment.function.arguments;
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return {
+    // null (not "") when no content delta ever arrived — matching what a
+    // non-streamed pure-tool-call response reports.
+    content: sawContent ? content : null,
+    ...(toolCalls.length > 0
+      ? { tool_calls: toolCalls.filter((c) => c !== undefined) }
+      : {}),
+  };
 }
 
 /** OpenAI function-calling tool schemas for the three HA capabilities this
@@ -297,6 +448,12 @@ export async function runOpenAiAgent(
     config.timeoutMs || DEFAULT_TIMEOUT_MS,
   );
 
+  const onDelta = hooks.onDelta;
+  const batcher =
+    config.stream && onDelta
+      ? makeDeltaBatcher((text) => onDelta(text, meta))
+      : null;
+
   try {
     let finalText = "";
     let numTurns = 0;
@@ -312,6 +469,7 @@ export async function runOpenAiAgent(
         max_tokens: config.maxTokens || DEFAULT_MAX_TOKENS,
         temperature: config.temperature ?? DEFAULT_TEMPERATURE,
         ...config.extraBody,
+        ...(config.stream ? { stream: true } : {}),
       };
       if (tools.length > 0) body.tools = tools;
 
@@ -331,12 +489,22 @@ export async function runOpenAiAgent(
           `@ai/openai_agent: ${endpoint} responded ${res.status}: ${await res.text()}`,
         );
       }
-      const json = (await res.json()) as ChatCompletionResponse;
-      const message = json.choices?.[0]?.message;
-      if (!message) {
-        throw new Error(
-          `@ai/openai_agent: ${endpoint} returned no choices in its response`,
+      let message: { content: string | null; tool_calls?: ToolCall[] };
+      if (config.stream) {
+        message = await consumeSseTurn(
+          res,
+          endpoint,
+          batcher ? batcher.push : null,
         );
+      } else {
+        const json = (await res.json()) as ChatCompletionResponse;
+        const parsed = json.choices?.[0]?.message;
+        if (!parsed) {
+          throw new Error(
+            `@ai/openai_agent: ${endpoint} returned no choices in its response`,
+          );
+        }
+        message = parsed;
       }
 
       const toolCalls = tools.length > 0 ? message.tool_calls : undefined;
@@ -371,6 +539,7 @@ export async function runOpenAiAgent(
       }
     }
 
+    batcher?.flush();
     return {
       text: finalText,
       costUsd: 0,

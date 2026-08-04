@@ -21,3 +21,7 @@ services:
       # Live vs just logged HASS calls
       FLOWBUN_DRY_RUN: "false"
       FLOWBUN_REGISTRY_URL: /app/registry
+      # Household-local time for anything that formats a Date — most
+      # visibly voice_gate's "Current date and time" prompt line, which
+      # the voice assistant reads times back from.
+      TZ: Europe/London
