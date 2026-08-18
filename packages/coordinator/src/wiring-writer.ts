@@ -16,6 +16,8 @@ export function describeMutation(mutation: WiringMutation): string {
       return `remove node: ${mutation.nodeId}`;
     case "node.config":
       return `node.config: ${mutation.nodeId}`;
+    case "node.block":
+      return `repoint node: ${mutation.nodeId} -> ${mutation.block}`;
     case "node.position":
       return `move node: ${mutation.nodeId}`;
     case "node.disabled":
@@ -124,6 +126,35 @@ export function applyMutation(
     case "node.config":
       edit(["nodes", mutation.nodeId, "config"], mutation.config);
       break;
+    case "node.block": {
+      if (!(mutation.nodeId in current.nodes)) {
+        throw new WiringWriteError(`node "${mutation.nodeId}" does not exist`);
+      }
+      if (current.nodes[mutation.nodeId]?.block === mutation.block) break; // no-op
+      // Deliberately patches *only* `block`, leaving this node's wires,
+      // position, config and `disabled` flag exactly as they were — which is
+      // the entire reason this op exists rather than the editor doing
+      // node.remove + node.add. The motivating flow is "fork this built-in
+      // block for just this node" (main.ts's forkBlockForNode): a user who
+      // clicks ✎ on a @core/scheduler node to customize it must not silently
+      // lose the wires feeding it. Unlike node.position's first write, every
+      // node already has a `block` field, so this is a genuine single-token
+      // diff with no sibling reformat.
+      //
+      // No check that `mutation.block` names a block that actually exists.
+      // That's assembleFlow's "references unknown block" error, surfaced by
+      // reloadWiringFileInner's structural-failure branch (main.ts): the
+      // already-running flow is left completely untouched, its status goes to
+      // failed-typecheck, and the edit sits on the undo stack. Re-validating
+      // here would be a second, weaker copy of a check that path already
+      // makes properly — see the repo's two-tier trust rule. Note this does
+      // mean a caller must confirm its new block actually *registered* before
+      // repointing a node at it; main.ts's forkBlockForNode does exactly
+      // that, because a block file that fails to import is skipped silently
+      // by discoverBlocks rather than failing anything.
+      edit(["nodes", mutation.nodeId, "block"], mutation.block);
+      break;
+    }
     case "node.position":
       edit(["nodes", mutation.nodeId, "position"], mutation.position);
       break;

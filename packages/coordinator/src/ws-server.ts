@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { ServerWebSocket } from "bun";
 import type { BlockRegistry, Wiring } from "flowbun";
@@ -12,8 +12,15 @@ import type {
   NpmPackageEntry,
   ServerToClient,
   TypecheckOutcome,
+  WiringMutation,
 } from "flowbun/ws";
 import type { AiHostClient } from "./ai-host-client";
+import {
+  describeBlockNameClash,
+  findBlockNameClash,
+  planBlockRepoint,
+  repointWiringText,
+} from "./block-rename";
 import { extractBlockName } from "./block-source";
 import type { ChatEventBuffer } from "./chat-event-buffer";
 import type { FlowPackageManager } from "./flow-packages";
@@ -63,8 +70,12 @@ export interface WsServerDeps {
   reloadBlocksAndRestartAll: (label?: string) => Promise<TypecheckOutcome>;
   createFlow: (name: string) => Promise<{ file: string; wiring: Wiring }>;
   createBlock: (name: string) => Promise<{ file: string; source: string }>;
+  /** `preferredName` names the copy after the node it was forked for (see
+   * main.ts's duplicateBlock); omitted, the copy gets the generic
+   * "<name> 2" form the palette's duplicate button advertises. */
   duplicateBlock: (
     blockName: string,
+    preferredName?: string,
   ) => Promise<{ file: string; name: string; source: string }>;
   deleteBlock: (file: string) => Promise<void>;
   deleteFlow: (file: string) => Promise<void>;
@@ -112,6 +123,7 @@ export function buildPalette(
     ),
     defaultConfig: entry.def.config,
     control: entry.def.control,
+    summary: entry.def.summary,
   }));
 }
 
@@ -125,6 +137,73 @@ export function startWsServer(port: number, deps: WsServerDeps) {
   function broadcast(msg: ServerToClient): void {
     const s = JSON.stringify(msg);
     for (const ws of sockets) ws.send(s);
+  }
+
+  /**
+   * The one place a wiring mutation is written to disk and reloaded. Shared
+   * by the `wiring.mutate` handler and by `block.fork` (which finishes by
+   * repointing a node at the copy it just made) so the ordering below — in
+   * particular markSelfWrite *before* the reload, not after — exists once
+   * rather than in two copies that can drift. Returns what both replies
+   * need; throws (WiringWriteError or otherwise) for the caller to turn
+   * into its own `ok: false` shape.
+   */
+  async function mutateWiring(
+    file: string,
+    mutation: WiringMutation,
+    label?: string,
+  ): Promise<{ wiring: Wiring; typecheck: TypecheckOutcome }> {
+    const entry = deps.flows.get(file);
+    if (!entry) throw new WiringWriteError(`unknown wiring file "${file}"`);
+    const path = join(deps.dataDir, "wiring", file);
+    const currentText = readFileSync(path, "utf8");
+    const nextText = applyMutation(currentText, mutation);
+    writeFileSync(path, nextText);
+    // Mark this write as our own *before* the (potentially queue-delayed —
+    // see main.ts's serializeReload comment) reload below, not after:
+    // fs.watch can otherwise fire first and, finding no recentSelfWrites
+    // entry yet, misattribute this write to an external edit — a redundant
+    // second reload plus a spurious duplicate undo-stack entry for one
+    // logical change. Matches block.write's own already-correct ordering.
+    deps.markSelfWrite(path);
+    const typecheck = await deps.reloadWiringFile(
+      path,
+      `${file}: ${label ?? describeMutation(mutation)}`,
+    );
+    await deps.undoStack.recordEdit(join("wiring", file));
+    const updated = deps.flows.get(file);
+    return {
+      wiring: updated ? updated.wiring : (JSON.parse(nextText) as Wiring),
+      typecheck,
+    };
+  }
+
+  /** Refuses a rename onto a name another block already holds — see
+   * block-rename.ts for why a collision is worse than it sounds. */
+  function assertBlockNameAvailable(newName: string, ownFile: string): void {
+    const clash = findBlockNameClash(deps.getPalette(), newName, ownFile);
+    if (clash) throw new Error(describeBlockNameClash(clash));
+  }
+
+  /** The IO half of a block rename; the decisions live in block-rename.ts.
+   * Writes only — the single reloadBlocksAndRestartAll the caller runs
+   * afterwards re-reads every wiring file from disk anyway, so one reload
+   * covers the block and the cascade together, and disk never holds a
+   * half-renamed set across a reload. */
+  function repointRenamedBlock(
+    oldName: string,
+    newName: string,
+  ): Array<{ file: string; nodeIds: string[] }> {
+    const plan = planBlockRepoint(deps.flows.values(), oldName);
+    for (const { file, nodeIds } of plan) {
+      const path = join(deps.dataDir, "wiring", file);
+      writeFileSync(
+        path,
+        repointWiringText(readFileSync(path, "utf8"), nodeIds, newName),
+      );
+      deps.markSelfWrite(path);
+    }
+    return plan;
   }
 
   deps.logBuffer.subscribe((entry) => broadcast({ type: "log", entry }));
@@ -175,32 +254,15 @@ export function startWsServer(port: number, deps: WsServerDeps) {
         switch (msg.type) {
           case "wiring.mutate": {
             try {
-              const entry = deps.flows.get(msg.file);
-              if (!entry)
-                throw new WiringWriteError(`unknown wiring file "${msg.file}"`);
-              const path = join(deps.dataDir, "wiring", msg.file);
-              const currentText = readFileSync(path, "utf8");
-              const nextText = applyMutation(currentText, msg.mutation);
-              writeFileSync(path, nextText);
-              // Mark this write as our own *before* the (potentially
-              // queue-delayed — see main.ts's serializeReload comment)
-              // reload below, not after: fs.watch can otherwise fire first
-              // and, finding no recentSelfWrites entry yet, misattribute
-              // this write to an external edit — a redundant second reload
-              // plus a spurious duplicate undo-stack entry for one logical
-              // change. Matches block.write's own already-correct ordering.
-              deps.markSelfWrite(path);
-              const typecheck = await deps.reloadWiringFile(
-                path,
-                `${msg.file}: ${describeMutation(msg.mutation)}`,
+              const { wiring, typecheck } = await mutateWiring(
+                msg.file,
+                msg.mutation,
               );
-              await deps.undoStack.recordEdit(join("wiring", msg.file));
-              const updated = deps.flows.get(msg.file);
               reply({
                 type: "wiring.mutateResult",
                 requestId: msg.requestId,
                 ok: true,
-                wiring: updated ? updated.wiring : JSON.parse(nextText),
+                wiring,
                 typecheck,
               });
             } catch (err) {
@@ -273,20 +335,54 @@ export function startWsServer(port: number, deps: WsServerDeps) {
                 relative(deps.repoRoot, path),
                 deps.repoRoot,
               );
+              // Detected from the on-disk text rather than trusted from the
+              // client, so this covers a name typed into the editor's header
+              // field AND one hand-edited straight into the source — and the
+              // agent's block_write tool, which has no header field at all.
+              // Scoped deliberately to this handler: an external edit picked
+              // up by the fs-watcher keeps failing loudly instead of
+              // triggering a surprise rewrite of files the user didn't touch.
+              const oldName = existsSync(path)
+                ? extractBlockName(readFileSync(path, "utf8"))
+                : undefined;
+              const newName = extractBlockName(formatted);
+              const renamed =
+                oldName !== undefined &&
+                newName !== undefined &&
+                oldName !== newName;
+              // Before the write, not after: a refused rename must leave the
+              // block file exactly as it was.
+              if (renamed) assertBlockNameAvailable(newName, msg.file);
               writeFileSync(path, formatted);
               deps.markSelfWrite(path);
+              const repointed = renamed
+                ? repointRenamedBlock(oldName, newName)
+                : [];
               const typecheck = await deps.reloadBlocksAndRestartAll(
-                `block write: ${msg.file}`,
+                renamed
+                  ? `block rename: ${oldName} -> ${newName} (${msg.file})`
+                  : `block write: ${msg.file}`,
               );
               await deps.undoStack.recordEdit(relPath);
+              for (const { file } of repointed) {
+                await deps.undoStack.recordEdit(join("wiring", file));
+              }
+              if (repointed.length > 0) {
+                console.log(
+                  `[coordinator] block rename "${oldName}" -> "${newName}": repointed ${repointed
+                    .map((r) => `${r.file} (${r.nodeIds.join(", ")})`)
+                    .join("; ")}`,
+                );
+              }
               reply({
                 type: "block.writeResult",
                 requestId: msg.requestId,
                 ok: true,
                 typecheck,
                 source: formatted,
-                name: extractBlockName(formatted),
+                name: newName,
                 undo: deps.undoStack.status(relPath),
+                repointed,
               });
             } catch (err) {
               reply({
@@ -385,6 +481,75 @@ export function startWsServer(port: number, deps: WsServerDeps) {
             } catch (err) {
               reply({
                 type: "block.duplicateResult",
+                requestId: msg.requestId,
+                ok: false,
+                error: String(err),
+              });
+            }
+            break;
+          }
+          case "block.fork": {
+            try {
+              // Guard the wiring file up front, before anything is written:
+              // a fork whose whole purpose is repointing one node shouldn't
+              // leave a stray block file behind just because the node's flow
+              // turned out not to exist.
+              const entry = deps.flows.get(msg.wiringFile);
+              if (!entry) {
+                throw new WiringWriteError(
+                  `unknown wiring file "${msg.wiringFile}"`,
+                );
+              }
+              if (!(msg.nodeId in entry.wiring.nodes)) {
+                throw new WiringWriteError(
+                  `node "${msg.nodeId}" does not exist in "${msg.wiringFile}"`,
+                );
+              }
+              // duplicateBlock already verifies the copy actually registered
+              // with discoverBlocks (and removes it again if not), so by the
+              // time this returns, `result.name` is safe to point a node at.
+              const result = await deps.duplicateBlock(
+                msg.blockName,
+                msg.nodeId,
+              );
+              let mutated: { wiring: Wiring; typecheck: TypecheckOutcome };
+              try {
+                mutated = await mutateWiring(
+                  msg.wiringFile,
+                  { op: "node.block", nodeId: msg.nodeId, block: result.name },
+                  `fork ${msg.blockName} for node ${msg.nodeId}`,
+                );
+              } catch (err) {
+                // The block landed but the repoint didn't, so the fork as a
+                // whole didn't happen — take the now-purposeless copy back
+                // off disk rather than leave the user a block they never
+                // asked for in the palette. deleteBlock refuses to remove a
+                // block any node still references, which is exactly right
+                // here: if it somehow *is* referenced, keeping it is the
+                // safe outcome, so surface both failures rather than either
+                // alone.
+                try {
+                  await deps.deleteBlock(result.file);
+                } catch (cleanupErr) {
+                  throw new Error(
+                    `${err}\n(also failed to remove the orphaned fork "${result.file}": ${cleanupErr})`,
+                  );
+                }
+                throw err;
+              }
+              reply({
+                type: "block.forkResult",
+                requestId: msg.requestId,
+                ok: true,
+                file: result.file,
+                name: result.name,
+                source: result.source,
+                wiring: mutated.wiring,
+                typecheck: mutated.typecheck,
+              });
+            } catch (err) {
+              reply({
+                type: "block.forkResult",
                 requestId: msg.requestId,
                 ok: false,
                 error: String(err),

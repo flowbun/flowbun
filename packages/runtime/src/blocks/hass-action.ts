@@ -13,6 +13,14 @@ export default defineBlock<
   config: {},
   inputs: { call: {} as ActionCall },
   outputs: {},
+  // Deliberately only the default target, not the domain/service: those
+  // arrive per-message on the `call` wire (see process() above), so there is
+  // no per-node value for them to summarize — printing anything about them
+  // here would be a guess. `target` is optional, and most nodes leave it to
+  // the incoming call, so this line blanks itself far more often than the
+  // other built-ins' do; that's the intended outcome, since a node with no
+  // default target genuinely has nothing node-specific to say.
+  summary: { icon: "⚡", lines: { "*": "{target.entity_id:truncate}" } },
   async process({ call }, ctx) {
     const resolved: ActionCall = {
       ...call,

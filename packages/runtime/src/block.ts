@@ -71,6 +71,46 @@ export type BlockControl =
       labels?: [string, string];
     };
 
+/**
+ * Declarative "what does this node actually do" one-liner for the editor's
+ * canvas — the read-only sibling of BlockControl above. A node showing only
+ * its id and block name ("weekly_scheduler" / "@core/scheduler") tells you
+ * nothing about the one thing you came to check; this is what lets it read
+ * "🗓 Tue · 15:00" without the editor ever learning a block name.
+ *
+ * It is *data*, not a function, and that is forced rather than stylistic:
+ * BlockPaletteEntry crosses a JSON WebSocket boundary (ws/protocol.ts), so
+ * nothing callable survives the trip — and the palette is broadcast once per
+ * block *type*, not per node, so even a function would be given no node to
+ * look at. Hence the template shape: the server ships one spec per block, and
+ * the client resolves it against each node's own config
+ * (editor/src/client/lib/blockSummary.ts owns that resolution, including the
+ * closed set of named formatters).
+ *
+ * Two deliberate rules live in that resolver, both worth knowing before
+ * writing a spec here:
+ *
+ * - A placeholder that can't be resolved (key absent from this node's config,
+ *   or a formatter that declines the value) blanks the WHOLE line rather than
+ *   emitting a literal `"{time}"`. A summary is a convenience; a half-rendered
+ *   one is actively misleading, and misleading is worse than absent.
+ * - `"*"` is the fallback line, so a block with `switchOn` still summarizes
+ *   under a mode nobody wrote a line for, instead of falling silent exactly
+ *   when the config is unusual enough to be worth reading.
+ */
+export interface BlockSummary {
+  /** Rendered before the text. */
+  icon?: string;
+  /** Config key whose value selects a line from `lines`; omit for a block
+   * whose summary doesn't vary by mode (in which case only `"*"` is
+   * consulted). */
+  switchOn?: string;
+  /** Keyed by the `switchOn` value, with "*" as the fallback. Each value is
+   * a template: "{time}" interpolates config.time; "{weekdays:weekdays}"
+   * runs config.weekdays through the named formatter first. */
+  lines: Record<string, string>;
+}
+
 interface BlockDefBase<
   Config,
   Inputs extends PortShape,
@@ -81,6 +121,7 @@ interface BlockDefBase<
   inputs: Inputs;
   outputs: Outputs;
   control?: BlockControl;
+  summary?: BlockSummary;
 }
 
 /** An ordinary block: fires once per message arriving at one input port, returns (or emits nothing for) the ports it produced. The default kind — `kind` may be omitted. */

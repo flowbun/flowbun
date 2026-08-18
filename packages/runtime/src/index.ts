@@ -2,6 +2,7 @@ export type {
   AnyBlockDef,
   BlockContext,
   BlockDef,
+  BlockSummary,
   FiringInputs,
   InputsOf,
   Logger,

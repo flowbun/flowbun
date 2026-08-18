@@ -36,6 +36,13 @@ export default defineBlock<
   },
   inputs: { reply: {} as HttpInReply, chunk: {} as HttpInChunk },
   outputs: { request: {} as HttpInRequest },
+  // Port is the load-bearing detail: two @http/in nodes in different flows
+  // silently fighting over one port is the failure this makes visible at a
+  // glance. Not the HTTP method — this block accepts any (see ../http/in.ts,
+  // which filters on `path`/`token` only), so there is no configured method
+  // to show. `path` is "" by default, meaning "any path", and interpolates
+  // to nothing — ":8130" is then the honest, complete summary.
+  summary: { icon: "🌐", lines: { "*": ":{port}{path}" } },
   async subscribe(ctx, emit) {
     const { stop } = await startHttpIn(ctx.config, ctx.log, (request) =>
       emit("request", request),

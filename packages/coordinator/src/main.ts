@@ -19,7 +19,7 @@ import type {
 } from "flowbun/ws";
 import type { AgentToolDeps } from "./agent/tools";
 import { createAiHostClient } from "./ai-host-client";
-import { renameBlockDefName } from "./block-source";
+import { renameBlockDefName, rewriteRelativeImports } from "./block-source";
 import { ChatEventBuffer } from "./chat-event-buffer";
 import { runReplQuery } from "./db-repl";
 import { createFlowPackageManager } from "./flow-packages";
@@ -874,19 +874,48 @@ async function main(): Promise<void> {
    * "<name> <n>" suffix, matching the generic-name convention the editor's
    * duplicate button advertises. The user renames it to something real via
    * the block editor's name field once they've opened it.
+   *
+   * The copy can't keep the original's *imports* either, for built-ins:
+   * blocks/*.ts live inside the flowbun package and import each other
+   * package-relatively (`"../block"`), which from data/blocks/ resolves to a
+   * nonexistent `data/block` and makes Bun reject the module outright. That
+   * failed completely silently before rewriteRelativeImports existed —
+   * discoverBlocks catches the import error, logs `[discoverBlocks] ...
+   * failed to import, skipping it` and moves on, and the reload typecheck
+   * below passes anyway because typecheck/generate.ts only emits imports for
+   * blocks some flow references, which a brand-new duplicate never is. Net
+   * result: success reported, editor opens the file, block never shows up in
+   * the palette. Add-on sources already import from `"flowbun"` and are left
+   * strictly alone.
+   *
+   * Hence also the post-reload registry check: a duplicate that didn't
+   * register is a failure, and the only honest thing to do is say so and
+   * take the orphaned file back off disk rather than leave data/blocks/
+   * littered with a file that will never load.
    */
   async function duplicateBlock(
     blockName: string,
+    preferredName?: string,
   ): Promise<{ file: string; name: string; source: string }> {
     const entry = registry.get(blockName);
     if (!entry) {
       throw new Error(`unknown block "${blockName}"`);
     }
-    const source = await Bun.file(entry.modulePath).text();
+    const raw = await Bun.file(entry.modulePath).text();
+    const source =
+      entry.origin === "builtin" ? rewriteRelativeImports(raw) : raw;
 
-    let newName = `${blockName} 2`;
-    for (let n = 3; registry.has(newName); n++) {
-      newName = `${blockName} ${n}`;
+    // A copy made for one specific node (forkBlockForNode below) wants a name
+    // that means something on the canvas -- "weekly_scheduler", not
+    // "@core/scheduler 2" -- so callers holding that context pass one. The
+    // palette's plain duplicate button has no such context and keeps the
+    // generic suffixed form it already advertised. Both then share the same
+    // next-free-suffix loop, so a preferred name that's already taken gets
+    // suffixed rather than colliding with the block it would shadow.
+    const stem = preferredName ?? blockName;
+    let newName = preferredName ?? `${stem} 2`;
+    for (let n = 2; registry.has(newName); n++) {
+      newName = `${stem} ${n}`;
     }
 
     const slug = slugifyName(newName);
@@ -914,6 +943,21 @@ async function main(): Promise<void> {
     );
     if (!check.ok) {
       throw new Error(`duplicated block failed typecheck:\n${check.output}`);
+    }
+    // reloadBlocksAndRestartAll reassigns `registry`, so this reads the
+    // post-reload one. A miss means discoverBlocks refused the file — an
+    // unresolvable import, a name collision — and said so only in the
+    // coordinator's own log, since a typecheck that never referenced this
+    // block can't fail on it. Same recentSelfWrites treatment as the write
+    // path above so removing the orphan doesn't make the fs-watcher fire a
+    // second, pointless reload.
+    if (!registry.has(newName)) {
+      recentSelfWrites.set(path, Date.now());
+      await unlink(path);
+      throw new Error(
+        `duplicated block "${newName}" (${file}) failed to load and was removed — ` +
+          `see the coordinator log's "[discoverBlocks] ... failed to import, skipping it" line for the reason`,
+      );
     }
     await undoStack.recordEdit(join("blocks", file));
     console.log(

@@ -1,4 +1,4 @@
-import type { BlockControl } from "../block";
+import type { BlockControl, BlockSummary } from "../block";
 import type { LogRecord } from "../ipc/protocol";
 import type { Wiring } from "../wiring/schema";
 
@@ -71,6 +71,12 @@ export interface BlockPaletteEntry {
    * the node, without hardcoding by block name. Absent for the common case
    * of a block with no canvas-level control at all. */
   control?: BlockControl;
+  /** Declarative on-canvas config summary (see block.ts's BlockSummary) —
+   * a *template*, not rendered text, precisely because this palette is
+   * broadcast per block type while the config it describes is per node: the
+   * client resolves it against each node's own config. Absent for a block
+   * whose config has nothing worth surfacing on the canvas. */
+  summary?: BlockSummary;
 }
 
 export interface HassEntitySummary {
@@ -292,6 +298,14 @@ export type WiringMutation =
   // never passes through a state where a wire points at a node id that no
   // longer exists.
   | { op: "node.rename"; nodeId: string; newNodeId: string }
+  // Repoints an existing node at a different block, keeping everything else
+  // about that node intact: its wires, position, config and `disabled` flag
+  // all survive, because the node itself isn't being replaced — only which
+  // block it runs. That's what makes the editor's "fork this built-in block
+  // for just this node" action a single mutation (duplicate the block into
+  // data/blocks/, then point this one node at the copy) rather than a
+  // remove + re-add that would drop every wire and force a re-layout.
+  | { op: "node.block"; nodeId: string; block: string }
   | { op: "wire.add"; from: string; to: string } // "nodeId.port" refs, per parsePortRef
   | { op: "wire.remove"; from: string; to: string }
   // Retargets one end (or both) of an existing wire to a different port on
@@ -326,6 +340,24 @@ export type ClientToServer =
   // `name`, since a built-in has no `file`) into a new, independently
   // editable file under data/blocks/ — see coordinator's duplicateBlock.
   | { type: "block.duplicate"; requestId: string; blockName: string }
+  // Duplicates `blockName` into data/blocks/ AND repoints one existing node
+  // at the copy, as a single server-side step. Two things make this a
+  // dedicated message rather than a block.duplicate followed by a
+  // node.block wiring.mutate from the client: the copy has to be confirmed
+  // to have actually *registered* before anything points at it (a block
+  // file that fails to import is skipped silently by discoverBlocks, so an
+  // unchecked repoint would break the flow), and a client-driven pair can
+  // half-succeed — leaving either an orphan block file or a node pointing
+  // at nothing — with no single place to roll back from.
+  | {
+      type: "block.fork";
+      requestId: string;
+      /** Palette block to fork, by internal `name` (a built-in has no file). */
+      blockName: string;
+      /** Wiring file holding the node to repoint — NOT the block's file. */
+      wiringFile: string;
+      nodeId: string;
+    }
   | { type: "flow.delete"; requestId: string; file: string }
   | { type: "flow.restart"; requestId: string; flow: string }
   | { type: "flow.fireNode"; requestId: string; flow: string; nodeId: string }
@@ -448,6 +480,13 @@ export type ServerToClient =
        * (see FlowEntry.undo) — the Monaco editor's undo/redo buttons read
        * this directly off every block.*Result instead. */
       undo: UndoStatus;
+      /** Nodes repointed because this save renamed the block's own `name:`
+       * field. Empty for an ordinary save. Renaming a block used to strand
+       * every node referencing it (assembleFlow: "references unknown block"),
+       * so the server now cascades the rename across every flow — this
+       * reports what it touched, since silently rewriting other flows' files
+       * would be worse than the bug it fixes. */
+      repointed: Array<{ file: string; nodeIds: string[] }>;
     }
   | { type: "block.writeResult"; requestId: string; ok: false; error: string }
   | {
@@ -500,6 +539,24 @@ export type ServerToClient =
       ok: false;
       error: string;
     }
+  | {
+      type: "block.forkResult";
+      requestId: string;
+      ok: true;
+      /** Filename actually used under data/blocks/ — the caller opens the
+       * block editor on this. */
+      file: string;
+      /** The forked block's new internal name, derived from the node id it
+       * was forked for (so the canvas reads "weekly_scheduler", not
+       * "@core/scheduler 2") — suffixed if that name was already taken. */
+      name: string;
+      source: string;
+      /** Post-repoint wiring, so the canvas updates in the same round trip
+       * as every other wiring.mutate-shaped reply. */
+      wiring: Wiring;
+      typecheck: TypecheckOutcome;
+    }
+  | { type: "block.forkResult"; requestId: string; ok: false; error: string }
   | { type: "flow.deleteResult"; requestId: string; ok: true }
   | { type: "flow.deleteResult"; requestId: string; ok: false; error: string }
   | { type: "flow.restartResult"; requestId: string; ok: true }

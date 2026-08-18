@@ -1,4 +1,5 @@
 import { Handle, type NodeProps, Position } from "@xyflow/react";
+import { renderBlockSummary } from "../../lib/blockSummary";
 import { formatClockTime } from "../../lib/formatTime";
 import { generateRequestId } from "../../lib/requestId";
 import { useFlowbunSocket } from "../../ws/FlowbunSocketContext";
@@ -25,6 +26,13 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
   const injectLabel =
     (isFire && (data.config as { label?: string } | undefined)?.label) ||
     "Fire";
+  // The read-only counterpart to `control` (see block.ts's BlockSummary):
+  // the block type ships a template, this node's own config fills it in, so
+  // "@core/scheduler" reads as "🗓 Tue · 15:00" without the canvas ever
+  // learning a block name. Undefined whenever the block has no summary spec
+  // or this node's config can't fill one in — nothing is rendered at all in
+  // that case, rather than an empty row that would make every node taller.
+  const summary = renderBlockSummary(data.def?.summary, data.config);
 
   async function handleFire(): Promise<void> {
     const result = await send({
@@ -102,12 +110,36 @@ export function BlockNode({ data }: NodeProps & { data: BlockNodeData }) {
       </div>
       <div
         style={{
-          padding: "4px 10px 8px",
+          padding: summary ? "4px 10px 1px" : "4px 10px 8px",
           color: isHassBlock(data.block) ? "var(--accent)" : "var(--text-dim)",
         }}
       >
         {data.block}
       </div>
+      {summary && (
+        <div
+          // The summary is a deliberately lossy one-liner (truncated values,
+          // secrets masked, one mode's keys only) — the hover title is where
+          // the node's actual config lives, so nothing the summary elides is
+          // more than a pointer away.
+          title={JSON.stringify(data.config, null, 2)}
+          style={{
+            padding: "0 10px 8px",
+            color: "var(--text-dim)",
+            // Nodes are minWidth: 140 with no max — they size to their
+            // content — so the cap has to live here, on the one child whose
+            // length the user controls. Without it a verbose config would
+            // widen the node itself (nothing would ever actually ellipsize,
+            // since the node would just grow to fit).
+            maxWidth: 200,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {summary}
+        </div>
+      )}
       {isFire && (
         <div style={{ padding: "0 10px 8px" }}>
           <button

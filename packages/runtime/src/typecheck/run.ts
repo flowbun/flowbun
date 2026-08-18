@@ -70,7 +70,15 @@ export async function runTypecheck(
         "flowbun/core/scheduler": [`${runtimeSrcRel}/core/scheduler.ts`],
         "flowbun/core/inject": [`${runtimeSrcRel}/core/inject.ts`],
         "flowbun/core/debug": [`${runtimeSrcRel}/core/debug.ts`],
+        // core/switch and ai/openai-agent are exported purely so that
+        // @core/switch, @ai/agent-hass and @ai/openai_agent can be forked
+        // into an editable data/blocks/ copy at all: block-source.ts's
+        // rewriteRelativeImports can only map a built-in's "../core/switch"
+        // onto a public subpath that actually exists. Without these two the
+        // fork fails loudly (by design) for exactly those three built-ins.
+        "flowbun/core/switch": [`${runtimeSrcRel}/core/switch.ts`],
         "flowbun/ai/agent": [`${runtimeSrcRel}/ai/agent.ts`],
+        "flowbun/ai/openai-agent": [`${runtimeSrcRel}/ai/openai-agent.ts`],
         "flowbun/ai/voice-timers": [`${runtimeSrcRel}/ai/voice-timers.ts`],
         "flowbun/auth": [`${runtimeSrcRel}/auth/session.ts`],
       },

@@ -30,6 +30,11 @@ export const WiringMutationSchema = z.discriminatedUnion("op", [
     config: z.unknown(),
   }),
   z.object({
+    op: z.literal("node.block"),
+    nodeId: z.string(),
+    block: z.string(),
+  }),
+  z.object({
     op: z.literal("node.position"),
     nodeId: z.string(),
     position: WiringPositionSchema,

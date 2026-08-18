@@ -64,6 +64,9 @@ export function MonacoBlockEditor({
   const [name, setName] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState("");
   const [typecheck, setTypecheck] = useState<TypecheckOutcome | null>(null);
+  const [repointed, setRepointed] = useState<
+    Array<{ file: string; nodeIds: string[] }>
+  >([]);
   const [saving, setSaving] = useState(false);
   const [undo, setUndo] = useState<UndoStatus>({
     canUndo: false,
@@ -137,6 +140,12 @@ export function MonacoBlockEditor({
           setUndo(r.undo);
           setName(r.name ?? null);
           setNameDraft(r.name ?? "");
+          // A rename cascades into every flow referencing this block (see
+          // ws-server's repointRenamedBlock). Rewriting other flows' wiring
+          // files is exactly the kind of thing that must not happen silently,
+          // so say what was touched. Cleared on any save that renamed
+          // nothing, so it can't linger as stale reassurance.
+          setRepointed(r.repointed);
         }
       }
     } finally {
@@ -291,6 +300,16 @@ export function MonacoBlockEditor({
           />
         </div>
         {saving && <div className="typecheck-ok">saving…</div>}
+        {!saving && repointed.length > 0 && (
+          <div className="block-editor-repointed">
+            Renamed to <code>{name}</code> —{" "}
+            {repointed.reduce((n, r) => n + r.nodeIds.length, 0)} node(s)
+            updated:{" "}
+            {repointed
+              .map((r) => `${r.file} (${r.nodeIds.join(", ")})`)
+              .join("; ")}
+          </div>
+        )}
         {typecheck &&
           !saving &&
           (typecheck.ok ? (

@@ -54,6 +54,11 @@ function Shell() {
     file: string;
     name: string;
   } | null>(null);
+  const [forkTarget, setForkTarget] = useState<{
+    file: string;
+    nodeId: string;
+    blockName: string;
+  } | null>(null);
   const [flowDetailFile, setFlowDetailFile] = useState<string | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
   const [packagesOpen, setPackagesOpen] = useState(false);
@@ -128,6 +133,38 @@ function Shell() {
     } else {
       setBlockActionError(r.error);
     }
+  }
+
+  // ✎ on a node whose block is a built-in. Built-ins have no `file` — they
+  // live in the image under packages/runtime and are replaced on every
+  // rebuild — so there is nothing for Monaco to open, and editing the
+  // "shared" thing wouldn't be what the user wants anyway: they're looking
+  // at one node and want to change how that node behaves. block.fork does
+  // both halves server-side in one step (copy + repoint) precisely so this
+  // can't half-succeed; see its own doc comment in ws/protocol.ts.
+  async function handleForkBlockForNode(
+    file: string,
+    nodeId: string,
+    blockName: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const r = await send({
+      type: "block.fork",
+      requestId: generateRequestId(),
+      blockName,
+      wiringFile: file,
+      nodeId,
+    });
+    if (r.type !== "block.forkResult") {
+      return { ok: false, error: "unexpected response from server" };
+    }
+    if (!r.ok) return { ok: false, error: r.error };
+    // Same "open what you just made" flow as handleDuplicateBlock and
+    // NewBlockDialog: the point of forking is to edit the copy, so land the
+    // user in it rather than making them find it in the palette. The node id
+    // followed the fork's new block name, not the other way round, so the
+    // config panel behind this stays pointed at the same node throughout.
+    setBlockEditorFile(r.file);
+    return { ok: true };
   }
 
   function handleUndo() {
@@ -335,6 +372,28 @@ function Shell() {
               }}
               onClose={() => navigate(entry.file, null)}
               onOpenBlockEditor={setBlockEditorFile}
+              onFork={() =>
+                setForkTarget({
+                  file: entry.file,
+                  nodeId: selectedNodeId,
+                  blockName: selectedNode.block,
+                })
+              }
+              sharedWith={
+                // Across every flow, not just this one: a block's source is
+                // global, so "am I the only user" can't be answered from the
+                // open canvas alone.
+                [...state.flows.values()].reduce(
+                  (n, f) =>
+                    n +
+                    Object.entries(f.wiring.nodes).filter(
+                      ([id, node]) =>
+                        node.block === selectedNode.block &&
+                        !(f.file === entry.file && id === selectedNodeId),
+                    ).length,
+                  0,
+                )
+              }
               onDelete={async () => {
                 const r = await send({
                   type: "wiring.mutate",
@@ -431,6 +490,37 @@ function Shell() {
             }
             return r;
           }}
+        />
+      )}
+      {forkTarget && (
+        <ConfirmDialog
+          title="Fork block for this node"
+          message={
+            <>
+              <code>{forkTarget.blockName}</code> is a built-in block, so it has
+              no source file you can edit. Copy it into an editable add-on block
+              used only by <code>{forkTarget.nodeId}</code>?
+              <br />
+              <br />
+              The palette's <code>{forkTarget.blockName}</code> is left
+              untouched, as is every other node using it. This node's wires and
+              config are preserved. The new block is committed to{" "}
+              <code>data/</code>'s own git history, but it isn't on this flow's
+              undo stack — to reverse it, repoint the node and delete the block
+              from the palette.
+            </>
+          }
+          confirmLabel="Fork"
+          pendingLabel="Forking…"
+          danger={false}
+          onClose={() => setForkTarget(null)}
+          onConfirm={() =>
+            handleForkBlockForNode(
+              forkTarget.file,
+              forkTarget.nodeId,
+              forkTarget.blockName,
+            )
+          }
         />
       )}
       {deleteFlowTarget && (

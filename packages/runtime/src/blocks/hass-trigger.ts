@@ -25,6 +25,14 @@ export default defineBlock<
   config: { entity: "" },
   inputs: {},
   outputs: { changed: {} as TriggerOutputs["changed"] },
+  // Which entity this watches is the whole content of the node — two
+  // @hass/trigger nodes side by side are otherwise indistinguishable on the
+  // canvas. Truncated because entity ids run long (`sensor.givtcp_…_soc`)
+  // and a node must not grow to fit one; the full value is in the node's
+  // hover title. A freshly-dropped node's default `entity` is "", which
+  // resolves to an empty line and so shows no summary at all — correct: it
+  // isn't watching anything yet.
+  summary: { icon: "👁", lines: { "*": "{entity:truncate}" } },
   async subscribe(ctx, emit) {
     return registerHassTrigger(ctx.config, (payload) =>
       emit("changed", payload),

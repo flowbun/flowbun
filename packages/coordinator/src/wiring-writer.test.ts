@@ -325,6 +325,67 @@ describe("applyMutation round-trip fidelity", () => {
     expect(JSON.parse(reenabled).disabled).toBeUndefined();
   });
 
+  test("node.block repoints the node and preserves its config, position and every wire touching it", () => {
+    const original = readFileSync(FILE, "utf8");
+    // The real motivating case: forking a shared block for one node only
+    // (see applyMutation's own node.block comment). "settle" carries both a
+    // config and two wires, which is exactly what a node.remove + node.add
+    // round-trip would have destroyed.
+    const mutated = applyMutation(original, {
+      op: "node.block",
+      nodeId: "settle",
+      block: "settle_debounce",
+    });
+    const parsed = JSON.parse(mutated);
+    const parsedOriginal = JSON.parse(original);
+
+    expect(parsed.nodes.settle.block).toBe("settle_debounce");
+    expect(parsed.nodes.settle.config).toEqual(
+      parsedOriginal.nodes.settle.config,
+    );
+    expect(parsed.wires).toEqual(parsedOriginal.wires);
+    expect(parsed.nodes.motion).toEqual(parsedOriginal.nodes.motion);
+    expect(parsed.nodes.decide).toEqual(parsedOriginal.nodes.decide);
+    expect(parsed.nodes.lights).toEqual(parsedOriginal.nodes.lights);
+  });
+
+  test("node.block is a true single-token diff — no sibling reformat", () => {
+    const original = readFileSync(FILE, "utf8");
+    // Unlike node.position's *first* write (which expands an inline node
+    // object to multi-line because the field is genuinely new), every node
+    // already has a "block" field, so this only ever replaces one string
+    // token. "settle" is the inline node, i.e. the worst case for this.
+    const mutated = applyMutation(original, {
+      op: "node.block",
+      nodeId: "settle",
+      block: "settle_debounce",
+    });
+    expect(mutated).toBe(
+      original.replace('"block": "debounce"', '"block": "settle_debounce"'),
+    );
+  });
+
+  test("node.block to the block it already uses is a no-op", () => {
+    const original = readFileSync(FILE, "utf8");
+    const mutated = applyMutation(original, {
+      op: "node.block",
+      nodeId: "settle",
+      block: "debounce",
+    });
+    expect(mutated).toBe(original);
+  });
+
+  test("node.block on a nonexistent node throws rather than creating a blockless node", () => {
+    const original = readFileSync(FILE, "utf8");
+    expect(() =>
+      applyMutation(original, {
+        op: "node.block",
+        nodeId: "does-not-exist",
+        block: "whatever",
+      }),
+    ).toThrow(WiringWriteError);
+  });
+
   test("node.config on a nonexistent node throws rather than silently creating an invalid node", () => {
     const original = readFileSync(FILE, "utf8");
     // jsonc-parser's modify() would happily create {"nodes":{"does-not-exist":{"config":{}}}}

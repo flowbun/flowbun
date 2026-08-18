@@ -14,6 +14,8 @@ export function ConfirmDialog({
   message,
   confirmLabel = "Delete",
   cancelLabel = "Cancel",
+  pendingLabel = "Deleting…",
+  danger = true,
   onConfirm,
   onClose,
 }: {
@@ -21,6 +23,14 @@ export function ConfirmDialog({
   message: React.ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
+  /** Shown while onConfirm is in flight. Defaults to the delete wording this
+   * dialog was originally written for — every confirm was a deletion until
+   * the block-fork confirm, which is additive and would read as alarming
+   * nonsense mid-flight otherwise. */
+  pendingLabel?: string;
+  /** Styles the confirm button as destructive. Same reason as pendingLabel:
+   * forking a block creates something, it doesn't destroy anything. */
+  danger?: boolean;
   onConfirm: () => Promise<{ ok: true } | { ok: false; error: string }>;
   onClose: () => void;
 }) {
@@ -64,11 +74,13 @@ export function ConfirmDialog({
           </button>
           <button
             type="button"
-            className="create-dialog-submit-danger"
+            className={
+              danger ? "create-dialog-submit-danger" : "create-dialog-submit"
+            }
             onClick={handleConfirm}
             disabled={confirming}
           >
-            {confirming ? "Deleting…" : confirmLabel}
+            {confirming ? pendingLabel : confirmLabel}
           </button>
         </div>
       </div>
